@@ -64,3 +64,10 @@ docker exec "$NAME" python /tests/integration.py --audio /testdata --expect "$MO
 echo "-- Whisper endpoint (English and German)"
 docker exec "$NAME" python /tests/integration.py --uri tcp://127.0.0.1:10311 --audio /testdata --expect "$MODE" --min-voices 0 \
   --stt-limit "$WHISPER_LIMIT" --audio-de /testdata-de --min-exact-de 4
+echo "-- diagnostics page"
+docker exec "$NAME" python -c '
+import json, urllib.request
+s = json.load(urllib.request.urlopen("http://127.0.0.1:10312/api/status"))
+r = urllib.request.urlopen(urllib.request.Request("http://127.0.0.1:10312/api/synthesize", json.dumps({"text": "Diagnostics check."}).encode(), {"Content-Type": "application/json"}))
+assert r.headers["Content-Type"] == "audio/wav" and len(r.read()) > 1000
+print("ok: version %s, %d voices, %d TTS models, sample speech %s s to first audio" % (s["version"], len(s["voices"]), len(s["tts_models"]), r.headers["X-First-Audio"]))'

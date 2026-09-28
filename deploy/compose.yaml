@@ -24,6 +24,7 @@ services:
     ports:
       - "${WYOMING_PORT:-10310}:10310"    # Parakeet speech-to-text + all voices
       - "${WHISPER_PORT:-10311}:10311"    # Whisper speech-to-text (a second choice in Home Assistant)
+      - "${DIAG_PORT:-10312}:10312"       # diagnostics web page (models, voices, sample speech, benchmark)
     configs:
       - source: wyoming_vulkan_config
         target: /etc/wyoming-vulkan/config.toml
@@ -53,6 +54,7 @@ configs:
       uri = "tcp://0.0.0.0:10310"
       stt = ["parakeet"]
       max_loaded_voices = ${MAX_LOADED_VOICES:-2}
+      web_port = 10312                   # diagnostics page inside the container (host port DIAG_PORT); 0 = off
 
       [[endpoint]]                       # host port WHISPER_PORT
       uri = "tcp://0.0.0.0:10311"

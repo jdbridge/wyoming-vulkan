@@ -27,6 +27,7 @@ class RuntimeReport:
     device_name: str = ""
     detail: str = ""
     fell_back: bool = False
+    memory_mb: Optional[float] = None  # approximate: growth of the container's memory while loading and warming up
 
     def label(self) -> str:
         """Short execution label for `info`: the GPU's name, "CPU", or "CPU fallback"."""

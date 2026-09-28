@@ -105,6 +105,20 @@ config when it runs without Compose.
 Voice folders on network shares are fine: they are optional (a missing or hung share only removes its voices), and a
 voice is offered only once its files have stopped changing.
 
+## Diagnostics page
+
+`http://<docker host>:10312/` (`DIAG_PORT`; `web_port = 0` in the inline config turns it off). No authentication:
+keep it on a trusted network, like the Wyoming ports.
+
+- **Overview:** version, uptime, process and container memory; the Wyoming endpoints; every speech-to-text engine
+  and text-to-speech model with where it runs, whether it is loaded and roughly how much memory loading it took;
+  the voices per model; a form that speaks any text with any voice in the browser (with first-audio time and RTF).
+- **Benchmark** (`/bench`): runs a text through every selected engine, model and voice with a separate, freshly
+  loaded copy of each model: cold time to the first sentence (load + first sentence), warm time to the first
+  sentence, total time, real-time factor, a word error rate (the audio transcribed back), and for the STT engines
+  the same on the text spoken by the default voice. Sortable table, CSV download.
+- JSON API: `GET /api/status`, `POST /api/synthesize` (`{"text", "voice"}` → WAV), `POST /api/bench`, `GET /api/bench`.
+
 ## Testing
 
 ```bash

@@ -76,12 +76,15 @@ async def main() -> int:
             cfg.options = config.speech_options(cfg.name, cfg.options)
         for cfg in config.stt + config.tts:
             engine = create_engine(cfg, config.gpu)
+            rss0 = devices.memory_mb()
             t = time.perf_counter()
             engine.load()
             loaded = time.perf_counter() - t
             t = time.perf_counter()
             engine.warm_up()
-            _LOGGER.info("%s %s: load %.1f s, warm-up %.1f s", cfg.kind, cfg.name, loaded, time.perf_counter() - t)
+            engine.runtime.memory_mb = devices.memory_mb() - rss0
+            _LOGGER.info("%s %s: load %.1f s, warm-up %.1f s, ~%.0f MiB", cfg.kind, cfg.name, loaded, time.perf_counter() - t,
+                         engine.runtime.memory_mb)
             (stt if cfg.kind == "stt" else tts).append(engine)
     except GpuUnavailable as err:
         _LOGGER.error("!!! iGPU requested (device = \"igpu\") but not available: %s", err)
@@ -124,6 +127,10 @@ async def main() -> int:
             "Endpoint %s: stt %s, tts %s", ep.uri, " > ".join(e.name for e in ep_stt) or "none",
             "all voices" if ep.tts else "none",
         )
+    if config.server.web_port:
+        from .web import DiagnosticsWeb
+
+        await DiagnosticsWeb(config, stt, voices).start(config.server.web_host, config.server.web_port)
     _LOGGER.info("Ready on %s after %.1f s", ", ".join(ep.uri for ep in config.endpoints), time.perf_counter() - started)
     await asyncio.gather(*(server.run(factory) for server, factory in servers))
     return 0

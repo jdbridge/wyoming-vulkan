@@ -79,6 +79,7 @@ wyoming_vulkan/
   voices.py          voice registry: fixed voices + voice folders, loaded on first use
   devices.py         Vulkan driver-file check, environment report
   healthcheck.py     describe -> info on every endpoint
+  web.py             diagnostics page (aiohttp, same event loop): status, sample speech, benchmark job
   engines/
     base.py          SttEngine / TtsEngine, RuntimeReport (requested vs actual device), CPU fallback
     ggml.py          ggml log capture and device list (shared by the whisper.cpp-family backends)
@@ -160,3 +161,4 @@ Parakeet and Whisper with `use_gpu = false`; Piper, Kokoro and KittenTTS with th
 - Render node by `RENDER_DEVICE` (long `devices` syntax, because by-path names contain colons), the host's render group by `RENDER_GID`, user by `PUID`/`PGID`.
 - **One data folder** `DATA_DIR` → `/data` (read-only, `rslave`, `create_host_path`): `models/<engine>/` (`scripts/fetch-models.sh -d <DATA_DIR>/models`) and `voices/` (own Piper voices). It may be a network share: if it is not mounted yet when the container starts, the models are missing, the server exits, Docker restarts it, and the share appears inside the container once the host mounts it (`rslave`). An optional extra voice folder (`EXTRA_VOICES_DIR` → `/voices-extra`).
 - Log rotation 3 × 10 MB.
+- **Diagnostics page** (`web.py`, port 10312): runs in the same event loop and reads the live engines and the voice registry. The benchmark creates separate engine instances with `create_engine` (so "cold" includes loading, and the serving engines are not disturbed apart from sharing the GPU), one model at a time, and closes each afterwards. Memory per model is the growth of the container's memory (cgroup) during load and warm-up: on an iGPU the model's buffers are system RAM and are charged there, whereas the process RSS misses them.

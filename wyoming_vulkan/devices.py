@@ -56,3 +56,29 @@ def log_environment() -> None:
     _LOGGER.info("Vulkan driver restriction: %s", {v: os.environ.get(v) for v in _ICD_VARS})
     render = sorted(str(p) for p in Path("/dev/dri").glob("renderD*")) if Path("/dev/dri").is_dir() else []
     _LOGGER.info("Render nodes in the container: %s", render or "none")
+
+
+def rss_mb() -> float:
+    """Resident memory of this process in MiB (an iGPU's buffers live in system RAM, so they partly show here)."""
+    try:
+        for line in open("/proc/self/status"):
+            if line.startswith("VmRSS:"):
+                return int(line.split()[1]) / 1024
+    except OSError:
+        pass
+    return 0.0
+
+
+def cgroup_memory_mb() -> float | None:
+    """The container's memory use (cgroup v2), including page cache; None outside a container."""
+    try:
+        return int(open("/sys/fs/cgroup/memory.current").read()) / 1024 / 1024
+    except (OSError, ValueError):
+        return None
+
+
+def memory_mb() -> float:
+    """What a model load costs: the container's memory (cgroup v2: includes GPU buffers of an iGPU and the page cache
+    of freshly read model files) if available, else this process's RSS."""
+    cg = cgroup_memory_mb()
+    return cg if cg is not None else rss_mb()

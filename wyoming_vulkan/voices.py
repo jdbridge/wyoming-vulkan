@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import AsyncIterator, Callable, Optional
 
+from . import devices
 from .config import EngineConfig, GpuConfig, LibraryConfig
 from .engines.base import SynthesisOptions, TtsEngine, TtsPack
 
@@ -209,9 +210,11 @@ class VoiceRegistry:
             if pack.failed:
                 return False
             t = time.perf_counter()
+            rss0 = devices.memory_mb()
             try:
                 await asyncio.wait_for(asyncio.to_thread(pack.engine.load), LOAD_TIMEOUT_S)
                 await asyncio.wait_for(asyncio.to_thread(pack.engine.warm_up), LOAD_TIMEOUT_S)
+                pack.engine.runtime.memory_mb = devices.memory_mb() - rss0
             except Exception as err:
                 pack.failed = str(err) or type(err).__name__
                 _LOGGER.error("tts pack %s could not be loaded: %s; its voices use the default voice", pack.engine.name, pack.failed)
@@ -390,9 +393,11 @@ class VoiceRegistry:
                 languages=entry.languages, options=self.speech_options(entry.name, library.options),
             )
             t = time.perf_counter()
+            rss0 = devices.memory_mb()
             try:
                 engine = self.factory(config, self.gpu)
                 await asyncio.wait_for(asyncio.to_thread(engine.load), LOAD_TIMEOUT_S)
+                engine.runtime.memory_mb = devices.memory_mb() - rss0
             except Exception as err:  # bad file, NAS gone, timeout: this voice is skipped until its file changes
                 _LOGGER.error("voice %s could not be loaded from %s: %s; using the default voice", entry.name, entry.path, err or type(err).__name__)
                 self._failed[entry.name] = entry.sig

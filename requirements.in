@@ -11,3 +11,4 @@ kokoro-onnx==0.6.1             # 2026-08-19, latest; Kokoro's text front end (es
 phonemizer==3.4.0              # KittenTTS's text front end (as in its reference code) and kokoro-onnx's
 espeakng-loader==0.2.4         # espeak-ng library + data for phonemizer (GPL-3.0, like piper's espeak)
 sentencepiece==0.2.2           # Pocket TTS text front end (vendored runtime in third_party/pocket_tts_onnx)
+aiohttp==3.14.3             # diagnostics web page (wyoming_vulkan/web.py)

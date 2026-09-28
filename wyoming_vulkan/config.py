@@ -22,6 +22,8 @@ class ServerConfig:
     samples_per_chunk: int = 1024  # audio-chunk size sent to clients, as in wyoming-piper
     max_audio_seconds: float = 60.0  # longer STT input is cut off (HA's VAD ends commands long before)
     max_loaded_voices: int = 2  # library voices kept loaded at once (least recently used is unloaded); [[tts]] always
+    web_port: int = 10312  # diagnostics web page (wyoming_vulkan/web.py); 0 = off
+    web_host: str = "0.0.0.0"
 
 
 @dataclass

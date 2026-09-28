@@ -863,5 +863,52 @@ class StreamingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(onnx_metadata(path), {"pocket_tts_voice/alba": "AAAA", "pocket_tts_config": '{"sample_rate": 24000}'})
 
 
+class WebTests(unittest.IsolatedAsyncioTestCase):
+    """The diagnostics page's API with fake engines."""
+
+    async def asyncSetUp(self):
+        from aiohttp.test_utils import TestClient, TestServer
+
+        from wyoming_vulkan.web import DiagnosticsWeb
+
+        config = load_config(write(MINIMAL))
+        self.registry = VoiceRegistry([FakeTts("en_US-fixed-high")], [], GpuConfig(), 2, FakeFactory())
+        await self.registry.add_packs([FakePack(name="kitten")])
+        self.web = DiagnosticsWeb(config, [FakeStt("a")], self.registry)
+        self.client = TestClient(TestServer(self.web.app))
+        await self.client.start_server()
+
+    async def asyncTearDown(self):
+        await self.client.close()
+
+    async def test_status(self):
+        s = await (await self.client.get("/api/status")).json()
+        self.assertEqual([m["kind"] for m in s["tts_models"]], ["fixed voice", "voice pack"])
+        self.assertEqual(s["tts_models"][1]["voices"], ["kitten_af_x", "kitten_bm_y"])
+        self.assertEqual([e["name"] for e in s["stt"]], ["a"])
+        for page in ("/", "/bench"):
+            self.assertIn("wyoming-vulkan", await (await self.client.get(page)).text())
+
+    async def test_synthesize(self):
+        r = await self.client.post("/api/synthesize", json={"text": "Hello there. Bye.", "voice": "kitten_af_x"})
+        self.assertEqual((r.status, r.headers["Content-Type"]), (200, "audio/wav"))
+        self.assertEqual((await r.read())[:4], b"RIFF")
+        self.assertEqual(r.headers["X-Voice"], "kitten_af_x")
+        self.assertEqual((await self.client.post("/api/synthesize", json={"text": " "})).status, 400)
+
+    async def test_bench_runs_and_reports_errors(self):
+        r = await self.client.post("/api/bench", json={"text": "Hello.", "engines": ["kitten", "stt"], "max_voices": 1})
+        self.assertEqual(r.status, 200)
+        for _ in range(100):
+            job = (await (await self.client.get("/api/bench")).json())["job"]
+            if not job["running"]:
+                break
+            await asyncio.sleep(0.05)
+        self.assertFalse(job["running"])
+        # the fake models cannot be loaded as real engines: every planned row is there, with an error
+        self.assertEqual(job["done"], job["total"])
+        self.assertTrue(all(row["error"] for row in job["rows"]))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1,0 +1,41 @@
+# --- Local system configuration and notes (kept out of the public repository) ---
+# Settings of this installation; the template is deploy/.env.example
+.env
+deploy/.env
+# Notes and research specific to the author's homelab (hosts, NAS, personal voices)
+CLAUDE.md
+HANDOFF.md
+RESEARCH.md
+prototype/
+.claude/
+
+# --- Models, voices and other large downloads (scripts/fetch-models.sh) ---
+models/
+voices/
+voice-library/
+voices-extra/
+deploy/models/
+deploy/voices/
+deploy/voice-library/
+deploy/voices-extra/
+*.bin
+*.gguf
+*.onnx
+*.onnx.json
+*.part
+
+# --- Test audio: only the published test sets are tracked ---
+*.wav
+!tests/data/**/*.wav
+
+# --- Python, editors, OS ---
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.idea/
+.vscode/
+*.swp
+.DS_Store

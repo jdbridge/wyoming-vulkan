@@ -1,0 +1,107 @@
+# wyoming-vulkan: Wyoming speech-to-text (Parakeet, Whisper) and text-to-speech (Piper) for Home Assistant on a
+# Vulkan GPU (tested: Intel iGPU). Every host-specific value is in .env (copy .env.example); the structure (engines,
+# endpoints, voice folders) is the server config inline below. Works as a Dockge stack (Dockge edits .env).
+#
+# Build the image first (Dockge cannot build it, it does not see the project folder):
+#   docker build -t wyoming-vulkan:latest .        (in the project folder; tests/run.sh builds and tests it)
+# Models and voices: scripts/fetch-models.sh (see README.md).
+services:
+  wyoming-vulkan:
+    image: ${WYOMING_VULKAN_IMAGE:-wyoming-vulkan:latest}
+    pull_policy: never
+    container_name: ${CONTAINER_NAME:-wyoming-vulkan}
+    restart: unless-stopped
+    user: "${PUID:-1000}:${PGID:-1000}"   # must be able to read the model and voice folders
+    group_add: ["${RENDER_GID}"]          # the host group that owns the render node: getent group render
+    devices:
+      # The GPU's render node. A /dev/dri/by-path/pci-...-render path pins the device if a host has several GPUs.
+      # (Long syntax: the colons in by-path names confuse the short one.)
+      - source: ${RENDER_DEVICE:-/dev/dri/renderD128}
+        target: /dev/dri/renderD128
+        permissions: rwm
+    ports:
+      - "${WYOMING_PORT:-10310}:10310"    # Parakeet speech-to-text + all voices
+      - "${WHISPER_PORT:-10311}:10311"    # Whisper speech-to-text (a second choice in Home Assistant)
+    configs:
+      - source: wyoming_vulkan_config
+        target: /etc/wyoming-vulkan/config.toml
+    volumes:
+      - ${MODELS_DIR:-./models}:/models:ro   # speech-to-text models (scripts/fetch-models.sh)
+      - ${VOICES_DIR:-./voices}:/voices:ro   # the default voice, and a voice folder
+      # Optional voice folders (a missing or unreachable folder only removes its voices). The long form with rslave
+      # propagation lets a network mount (NFS/SMB) that appears after the container started show up inside it.
+      - type: bind
+        source: ${VOICE_LIBRARY_DIR:-./voice-library}
+        target: /voices-library
+        read_only: true
+        bind: { propagation: rslave, create_host_path: true }
+      - type: bind
+        source: ${EXTRA_VOICES_DIR:-./voices-extra}
+        target: /voices-extra
+        read_only: true
+        bind: { create_host_path: true }
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
+configs:
+  wyoming_vulkan_config:
+    # The server's config (TOML) with values from .env. All options: config/config.example.toml.
+    content: |
+      # Home Assistant makes one speech-to-text entity per port and never chooses a model itself,
+      # so each speech-to-text engine gets its own port. The voices are offered on the Parakeet port.
+      [server]                           # host port WYOMING_PORT
+      uri = "tcp://0.0.0.0:10310"
+      stt = ["parakeet"]
+      max_loaded_voices = ${MAX_LOADED_VOICES:-2}
+
+      [[endpoint]]                       # host port WHISPER_PORT
+      uri = "tcp://0.0.0.0:10311"
+      stt = ["whisper"]
+
+      [gpu]                              # how the GPU is recognised
+      name_contains = "${GPU_NAME_CONTAINS:-Intel}"
+      vendor_id = ${GPU_VENDOR_ID:-0x8086}
+
+      [[stt]]
+      name = "parakeet"
+      backend = "parakeet.cpp"
+      model = "/models/${PARAKEET_MODEL:-ggml-parakeet-tdt-0.6b-v3-q8_0.bin}"
+      device = "${WYOMING_DEVICE:-auto}"
+      languages = "${PARAKEET_LANGUAGES:-en}"   # comma-separated, or auto (all 25 of Parakeet v3)
+      description = "Parakeet"
+      threads = ${STT_THREADS:-4}
+
+      [[stt]]
+      name = "whisper"
+      backend = "whisper.cpp"
+      model = "/models/${WHISPER_MODEL:-ggml-small.bin}"
+      device = "${WYOMING_DEVICE:-auto}"
+      languages = "auto"                 # every Whisper language (only "en" for .en models)
+      description = "${WHISPER_DESCRIPTION:-Whisper small}"
+      audio_ctx = ${WHISPER_AUDIO_CTX:-512}
+      threads = ${STT_THREADS:-4}
+
+      [[tts]]                            # the default voice: loaded and warmed up at start
+      name = "${DEFAULT_VOICE:-en_US-ljspeech-high}"
+      backend = "piper"
+      model = "/voices/${DEFAULT_VOICE:-en_US-ljspeech-high}.onnx"
+      device = "${WYOMING_DEVICE:-auto}"
+      languages = ["${DEFAULT_VOICE_LANGUAGE:-en_US}"]
+
+      # Voice folders, offered to Home Assistant and loaded on first use; a name found in an earlier folder wins.
+      [[tts_library]]
+      path = "/voices"
+      device = "${WYOMING_DEVICE:-auto}"
+
+      [[tts_library]]
+      path = "/voices-library"
+      device = "${WYOMING_DEVICE:-auto}"
+      optional = true
+      recursive = true
+
+      [[tts_library]]
+      path = "/voices-extra"
+      device = "${WYOMING_DEVICE:-auto}"
+      optional = true
+      min_age_seconds = ${EXTRA_VOICES_MIN_AGE:-60}

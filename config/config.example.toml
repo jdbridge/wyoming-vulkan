@@ -1,0 +1,67 @@
+# wyoming-vulkan configuration (TOML). Copied into the image as /etc/wyoming-vulkan/config.toml;
+# mount your own file there to change it. Design: DESIGN.md §3.4.
+
+[server]
+uri = "tcp://0.0.0.0:10310"      # the main endpoint
+samples_per_chunk = 1024         # size of the audio-chunk events sent back (as in wyoming-piper)
+max_audio_seconds = 60           # STT input beyond this is dropped
+max_loaded_voices = 2            # library voices kept in memory at once (least recently used is unloaded)
+
+[gpu]                            # how the GPU is recognised (Intel shown)
+name_contains = "Intel"          # in the ggml / Vulkan device description, e.g. "Intel(R) Graphics (ADL-N)"
+vendor_id = 0x8086               # PCI vendor of the ONNX Runtime WebGPU EP device
+
+# device per engine:
+#   igpu  use the iGPU; refuse to start if the GPU path is not really used (never a silent CPU run)
+#   cpu   use the CPU
+#   auto  try the iGPU, fall back to the CPU with a loud warning (the recommended default)
+# Where each engine really runs is always in `info`: "<description> [<GPU name> | CPU | CPU fallback]".
+
+[[stt]]                          # speech-to-text engines; the first is the default, `transcribe.name` selects one
+name = "parakeet-tdt-0.6b-v3"
+backend = "parakeet.cpp"         # whisper.cpp libparakeet (ggml)
+model = "/models/ggml-parakeet-tdt-0.6b-v3-q8_0.bin"
+device = "auto"
+languages = ["en"]               # advertised to HA; "auto" = all 25 languages of Parakeet v3
+description = "Parakeet"         # shown in info as "Parakeet [<where it runs>]"
+threads = 4                      # backend option: CPU threads
+
+# [[stt]]                        # Whisper through whisper.cpp's libwhisper (same image, same Vulkan path)
+# name = "whisper"
+# backend = "whisper.cpp"
+# model = "/models/ggml-small.bin" # scripts/fetch-models.sh --list
+# device = "auto"
+# languages = "auto"              # all Whisper languages (only "en" for .en models)
+# description = "Whisper small"
+# audio_ctx = 512                 # encoder window in 20 ms frames: 512 = ~10 s, ~3x faster; 0 = full 30 s
+# threads = 4
+# max_seconds = 15                # time budget per request (repetition loops are cut off)
+#
+# HA makes one STT entity per port and never picks a model, so every STT choice that should be selectable in HA
+# gets its own endpoint (all share the loaded engines). On each endpoint a request goes to the first engine that
+# supports its language; [server] is the main endpoint:
+#   [server] stt = ["parakeet-tdt-0.6b-v3", "whisper"]    # Parakeet for its languages, Whisper for the rest
+# [[endpoint]]
+# uri = "tcp://0.0.0.0:10311"
+# stt = ["whisper"]
+# tts = false                     # default; true also offers the voices here
+
+[[tts]]                          # fixed voices: loaded and warmed up at start; the first is the default voice
+name = "en_US-ljspeech-high"     # scripts/fetch-models.sh -d <voices> piper-en_US-ljspeech-high
+backend = "piper"                # Piper via ONNX Runtime (WebGPU EP on the iGPU)
+model = "/voices/en_US-ljspeech-high.onnx"   # config: <model>.json, or set `config = "..."`
+device = "auto"
+languages = ["en_US"]
+# description: shown in HA as the voice's name, "<description> [<where it runs>]"; default: the name without "en_US-"
+# backend options (default: the voice's own values): length_scale, noise_scale, noise_w_scale
+# auto_punctuation = ".?!"        # appended to sentences without end punctuation
+
+[[tts_library]]                  # a folder of voices: every <name>.onnx + <name>.onnx.json is offered to HA and
+path = "/voices"                 # loaded on first use; the list is re-read on each `describe` (HA asks every 30 s)
+backend = "piper"
+device = "auto"
+optional = false                 # true: a missing/unreadable folder only logs a warning
+recursive = false                # true: also scan subfolders
+min_age_seconds = 60             # files changed less than this long ago are skipped (still being written)
+# languages = ["en_US"]          # default: from the file name (en_US-...), else the voice's espeak voice
+# A voice that is also a fixed [[tts]] voice (same name) is served by the fixed one; the first folder wins otherwise.

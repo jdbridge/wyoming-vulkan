@@ -1,0 +1,4 @@
+de1|Schalte das Licht in der Küche ein.
+de2|Stelle die Temperatur im Wohnzimmer auf einundzwanzig Grad.
+de3|Wie wird das Wetter morgen?
+de4|Schalte alle Lichter im Erdgeschoss aus und schließe die Haustür ab.

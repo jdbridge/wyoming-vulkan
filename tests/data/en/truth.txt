@@ -1,0 +1,6 @@
+cmd1|Turn on the kitchen lights.
+cmd2|Set the living room temperature to twenty one degrees.
+cmd3|What's the weather like tomorrow?
+cmd4|Turn off all the lights downstairs and lock the front door.
+cmd5|Start the vacuum in the bedroom.
+cmd6|Remind me to take out the trash at seven p.m.

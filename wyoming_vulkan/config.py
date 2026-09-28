@@ -1,0 +1,196 @@
+"""TOML configuration: server, GPU recognition, STT and TTS engines, and folders of voices (TTS libraries)."""
+
+import tomllib
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Optional
+
+DEVICES = ("igpu", "cpu", "auto")
+DEFAULT_CONFIG = Path("/etc/wyoming-vulkan/config.toml")
+
+
+class ConfigError(ValueError):
+    pass
+
+
+@dataclass
+class ServerConfig:
+    uri: str = "tcp://0.0.0.0:10310"  # the main endpoint
+    stt: Optional[list[str]] = None  # STT engines offered on the main endpoint (default: all), in routing order
+    tts: bool = True  # voices offered on the main endpoint
+    name: Optional[str] = None  # program name HA shows for the main endpoint's STT (default: first engine's label)
+    samples_per_chunk: int = 1024  # audio-chunk size sent to clients, as in wyoming-piper
+    max_audio_seconds: float = 60.0  # longer STT input is cut off (HA's VAD ends commands long before)
+    max_loaded_voices: int = 2  # library voices kept loaded at once (least recently used is unloaded); [[tts]] always
+
+
+@dataclass
+class GpuConfig:
+    name_contains: str = "Intel"  # substring of the ggml / Vulkan device description
+    vendor_id: int = 0x8086  # PCI vendor of the ONNX Runtime EP device
+
+
+@dataclass
+class Attribution:
+    name: str
+    url: str
+
+
+@dataclass
+class EngineConfig:
+    kind: str  # "stt" or "tts"
+    name: str
+    backend: str
+    model: Path
+    device: str = "igpu"
+    languages: Optional[list[str]] = field(default_factory=lambda: ["en"])  # None ("auto"): the engine decides
+    description: Optional[str] = None
+    attribution: Optional[Attribution] = None
+    options: dict[str, Any] = field(default_factory=dict)  # backend-specific keys
+
+
+@dataclass
+class EndpointConfig:
+    """A Wyoming port. HA makes one STT entity per port and never picks a model itself, so every STT choice that
+    should be selectable in HA gets its own endpoint. All endpoints share the same loaded engines."""
+
+    uri: str
+    stt: Optional[list[str]] = None  # engine names in routing order (None: all); a request goes to the first engine
+    #                                  that supports its language, else to the first engine
+    tts: bool = False
+    name: Optional[str] = None
+
+
+@dataclass
+class LibraryConfig:
+    """A folder of voices: every <name>.onnx with a <name>.onnx.json next to it is offered, loaded on first use."""
+
+    path: Path
+    backend: str = "piper"
+    device: str = "auto"
+    optional: bool = False  # missing or unreadable folder: warning instead of refusing to start
+    recursive: bool = False  # also scan subfolders (e.g. piper/); the first file with a name wins
+    min_age_seconds: float = 60.0  # skip files changed more recently (a training run may still be writing them)
+    languages: Optional[list[str]] = None  # default: from the file name (en_US-...), else the voice's espeak voice
+    options: dict[str, Any] = field(default_factory=dict)  # backend options for every voice, as in [[tts]]
+
+
+@dataclass
+class Config:
+    server: ServerConfig
+    gpu: GpuConfig
+    stt: list[EngineConfig]
+    tts: list[EngineConfig]
+    tts_library: list[LibraryConfig] = field(default_factory=list)
+    endpoint: list[EndpointConfig] = field(default_factory=list)  # extra endpoints ([[endpoint]])
+
+    @property
+    def endpoints(self) -> list[EndpointConfig]:
+        """The main endpoint ([server]) followed by the extra ones."""
+        main = EndpointConfig(uri=self.server.uri, stt=self.server.stt, tts=self.server.tts, name=self.server.name)
+        return [main, *self.endpoint]
+
+
+_ENGINE_KEYS = {"name", "backend", "model", "device", "languages", "description", "attribution"}
+
+
+def _section(raw: dict, key: str, cls):
+    data = raw.get(key, {})
+    unknown = set(data) - set(cls.__dataclass_fields__)
+    if unknown:
+        raise ConfigError(f"[{key}]: unknown keys {sorted(unknown)}")
+    return cls(**data)
+
+
+def _languages(value) -> Optional[list[str]]:
+    """A list, "auto" (the engine decides: None), or a comma-separated string such as "en,de" (handy in .env)."""
+    if value == "auto":
+        return None
+    if isinstance(value, str):
+        return [v.strip() for v in value.replace(" ", ",").split(",") if v.strip()]
+    return list(value)
+
+
+def _engine(kind: str, i: int, data: dict) -> EngineConfig:
+    where = f"[[{kind}]] #{i + 1}"
+    for key in ("name", "backend", "model"):
+        if not data.get(key):
+            raise ConfigError(f"{where}: '{key}' is required")
+    device = data.get("device", "igpu")
+    if device not in DEVICES:
+        raise ConfigError(f"{where}: device must be one of {DEVICES}, not {device!r}")
+    attribution = data.get("attribution")
+    if attribution is not None:
+        attribution = Attribution(**attribution)
+    return EngineConfig(
+        kind=kind,
+        name=data["name"],
+        backend=data["backend"],
+        model=Path(data["model"]),
+        device=device,
+        languages=_languages(data.get("languages", ["en"])),
+        description=data.get("description"),
+        attribution=attribution,
+        options={k: v for k, v in data.items() if k not in _ENGINE_KEYS},
+    )
+
+
+_LIBRARY_KEYS = {"path", "backend", "device", "optional", "recursive", "min_age_seconds", "languages"}
+
+
+def _libraries(i: int, data: dict) -> list[LibraryConfig]:
+    """One [[tts_library]] entry; `path` is a folder or a list of folders that share the entry's settings."""
+    where = f"[[tts_library]] #{i + 1}"
+    paths = data.get("path")
+    paths = [paths] if isinstance(paths, str) else paths
+    if not paths or not all(isinstance(p, str) and p for p in paths):
+        raise ConfigError(f"{where}: 'path' is required (a folder or a list of folders)")
+    device = data.get("device", "auto")
+    if device not in DEVICES:
+        raise ConfigError(f"{where}: device must be one of {DEVICES}, not {device!r}")
+    known = {k: data[k] for k in _LIBRARY_KEYS - {"path"} if k in data}
+    options = {k: v for k, v in data.items() if k not in _LIBRARY_KEYS}
+    return [LibraryConfig(path=Path(p), **known, options=dict(options)) for p in paths]
+
+
+def _endpoint(i: int, data: dict) -> EndpointConfig:
+    where = f"[[endpoint]] #{i + 1}"
+    unknown = set(data) - set(EndpointConfig.__dataclass_fields__)
+    if unknown:
+        raise ConfigError(f"{where}: unknown keys {sorted(unknown)}")
+    if not data.get("uri"):
+        raise ConfigError(f"{where}: 'uri' is required")
+    return EndpointConfig(**data)
+
+
+def load_config(path: Path) -> Config:
+    with open(path, "rb") as f:
+        raw = tomllib.load(f)
+    unknown = set(raw) - {"server", "gpu", "stt", "tts", "tts_library", "endpoint"}
+    if unknown:
+        raise ConfigError(f"unknown sections {sorted(unknown)}")
+    config = Config(
+        server=_section(raw, "server", ServerConfig),
+        gpu=_section(raw, "gpu", GpuConfig),
+        stt=[_engine("stt", i, d) for i, d in enumerate(raw.get("stt", []))],
+        tts=[_engine("tts", i, d) for i, d in enumerate(raw.get("tts", []))],
+        tts_library=[lib for i, d in enumerate(raw.get("tts_library", [])) for lib in _libraries(i, d)],
+        endpoint=[_endpoint(i, d) for i, d in enumerate(raw.get("endpoint", []))],
+    )
+    if not (config.stt or config.tts or config.tts_library):
+        raise ConfigError("no [[stt]], [[tts]] or [[tts_library]] configured")
+    for engines in (config.stt, config.tts):
+        names = [e.name for e in engines]
+        if len(names) != len(set(names)):
+            raise ConfigError(f"duplicate engine names: {names}")
+    stt_names = {e.name for e in config.stt}
+    uris = [ep.uri for ep in config.endpoints]
+    if len(uris) != len(set(uris)):
+        raise ConfigError(f"duplicate endpoint uris: {uris}")
+    for ep in config.endpoints:
+        unknown_stt = set(ep.stt or []) - stt_names
+        if unknown_stt:
+            raise ConfigError(f"endpoint {ep.uri}: unknown stt engines {sorted(unknown_stt)} (have {sorted(stt_names)})")
+        if ep.stt == [] and not ep.tts:
+            raise ConfigError(f"endpoint {ep.uri} offers neither stt nor tts")
+    return config

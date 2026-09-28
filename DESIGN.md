@@ -16,7 +16,7 @@ Home Assistant                       Wyoming over TCP (JSON header line + option
 │   │     └─ Whisper:  ctypes → libwhisper.so ──┴─ ggml (Vulkan backend) ─┐     │
 │   └─ TTS: synthesize | synthesize-start/chunk/stop                        │     │
 │         → audio-start/chunk/stop (+ synthesize-stopped)                   │     │
-│         └─ Piper (piper-tts) → ONNX Runtime → WebGPU EP → Dawn ─┐         │     │
+│         └─ Piper / Kokoro / KittenTTS → ONNX Runtime → WebGPU EP → Dawn ┐ │     │
 │                                                  Vulkan loader ◄┴─────────┘     │
 │                                                  Mesa driver (one ICD file only) │
 └─────────────────────────────────────────────────────────── /dev/dri/renderD128 ─┘
@@ -84,7 +84,10 @@ wyoming_vulkan/
     ggml.py          ggml log capture and device list (shared by the whisper.cpp-family backends)
     parakeet_cpp.py  libparakeet via ctypes     device: igpu (Vulkan) | cpu
     whisper_cpp.py   libwhisper via ctypes      device: igpu (Vulkan) | cpu
+    ort_session.py   ONNX Runtime session on the WebGPU EP or the CPU, with the GPU proof (shared)
     piper_ort.py     Piper via ONNX Runtime      device: igpu (WebGPU EP) | cpu
+    kokoro_ort.py    Kokoro-82M voice pack       device: igpu (WebGPU EP) | cpu
+    kitten_ort.py    KittenTTS voice pack        device: igpu (WebGPU EP) | cpu
 ```
 
 - **Engines** are found by backend name in a registry and imported lazily. Interface: `load()`, `warm_up()`, `runtime`, `languages`, and `transcribe(float32 16 kHz mono, language) -> str` or `synthesize(sentence, options) -> int16 PCM`.
@@ -97,6 +100,8 @@ wyoming_vulkan/
 
 ### 3.5 Voices (`voices.py`)
 
+- **Names in HA:** every voice's description is `<Engine> <voice> [<where it runs>]` (`Piper ljspeech-high [...]`, `Kokoro af_heart [...]`, `Kitten Bella [...]`), so the engines stay grouped in HA's voice list. Piper voice ids are the file names; pack voice ids are `<pack>_<voice>`.
+- **Voice packs** (`[[tts_pack]]`, a `TtsPack` engine): one model with many voices (Kokoro, KittenTTS). At start only the voice list is read (small files, worker thread with timeout; unreadable files leave the pack out with a warning); the model loads and warms up on first use and stays loaded; a pack that fails to load disappears from `info` and its requests use the default voice. `use()` hands out a small handle binding the pack engine to one voice and that voice's speech settings.
 - **Fixed voices** (`[[tts]]`) are loaded and warmed up at start; the first is the default voice.
 - **Voice folders** (`[[tts_library]]`, `path` = a folder or a list; `recursive`, `optional`, `min_age_seconds`): every `<name>.onnx` with a `<name>.onnx.json` is offered. `describe` rescans the folders at most every 5 s. A voice loads on first use (in a worker thread, 90 s timeout), is reloaded when its files change, and at most `max_loaded_voices` folder voices stay loaded (least recently used is unloaded; never one that is in use). Unknown or broken voices fall back to the default voice; a broken voice stays hidden until its files change.
 - **Half-written files:** both files must exist, be non-empty and older than `min_age_seconds`; a voice that appears or changes while the server runs is offered only after its mtime and both sizes stayed the same for 10 s (a copy over SMB can keep the source's old mtime).
@@ -124,9 +129,23 @@ wyoming_vulkan/
 - GPU proof: `session.get_providers()[0] == "WebGpuExecutionProvider"`. Without a usable Vulkan device ONNX Runtime silently returns a CPU-only session; that case is caught here. The EP picks the physical GPU itself, so the Vulkan driver restriction (§2) is what guarantees the right one; the GPU name shown in `info` comes from the Vulkan device list.
 - Small shape and cast nodes run on the CPU EP on purpose; expected.
 
-### 4.4 CPU fallback
+### 4.4 Kokoro-82M and KittenTTS (voice packs)
 
-Parakeet and Whisper with `use_gpu = false`, Piper with the CPU EP. Everything keeps working, slower (see `README.md`).
+- **Every engine converts text itself** (the ONNX models take phoneme ids, not text): Piper through piper-tts; Kokoro through kokoro-onnx's tokenizer (espeak-ng via phonemizer, the standard front end of Kokoro's ONNX builds; the vocabulary comes from the model's `tokenizer.json`); KittenTTS exactly as its reference code does it (espeak en-us with punctuation and stress, words and punctuation space-separated, its symbol table, tokens `[0, …, 10, 0]`, style row by text length, per-voice `speed_priors` from `config.json`, the last 5000 samples cut). Only the ONNX session is ours, so all of them run on the WebGPU EP with the same GPU proof (`ort_session.make_session`).
+- **espeak-ng keeps global state:** two threads phonemising at once corrupt each other's phonemes, so all engines hold one shared `ESPEAK_LOCK` while phonemising (never during inference). Piper therefore phonemises and synthesises in separate steps (same result, including piper-tts's per-sentence peak normalisation, which all engines share via `to_pcm16`).
+- **Kokoro:** `model.onnx` (fp32; fp16 exports give NaN on the WebGPU EP), `voices/<id>.bin` (510 × 256 style table, row by token count), at most 510 tokens per call; voices whose language espeak can phonemise (a/b English, e, f, h, i, p); Japanese and Chinese need other front ends and are left out. 24 kHz. Verified: GPU output matches the CPU on 29 of 30 sentences (the one difference is small numeric drift, no added high-frequency noise, so not onnxruntime issue #29807).
+- **KittenTTS:** the nano model (15M); mini (80M) and micro (40M) were 5–10× slower on this iGPU and CPU. 24 kHz, English.
+- Speed (`length_scale`): packs take `speed = 1 / length_scale`.
+
+### 4.5 Engines tested and not added
+
+- **Pocket TTS** (Kyutai, 100M, CC-BY-4.0; single-file ONNX runtime by thewh1teagle/pocket-tts-onnx): perfect round trip; on the CPU RTF 0.42 with the first 80 ms frame after 0.07 s (autoregressive, streams frame by frame), on the WebGPU EP RTF 1.84 (too many tiny steps). A CPU-only pack with frame-level streaming would be the way to add it.
+- **CosyVoice3-0.5B:** its language model on llama.cpp's Vulkan backend generates 30 (Q8_0) to 34 (Q4_K_M) tokens/s on this iGPU; CosyVoice needs 25 per second of speech, so the language model alone uses 75–85 % of real time before the flow-matching model (1.3 GB ONNX) and the PyTorch vocoder: not real time here.
+- **Fish Speech 1.5, XTTS v2:** not attempted (non-commercial weights, far too large for this class of GPU).
+
+### 4.6 CPU fallback
+
+Parakeet and Whisper with `use_gpu = false`; Piper, Kokoro and KittenTTS with the CPU EP. Everything keeps working, slower (see `README.md`).
 
 ## 5. Start-up
 
@@ -139,5 +158,5 @@ Parakeet and Whisper with `use_gpu = false`, Piper with the CPU EP. Everything k
 
 - `compose.yaml` + `.env` (template `.env.example`); works as a Dockge stack. The image is built locally (`pull_policy: never`).
 - Render node by `RENDER_DEVICE` (long `devices` syntax, because by-path names contain colons), the host's render group by `RENDER_GID`, user by `PUID`/`PGID`.
-- Optional voice folders as read-only binds with `create_host_path` (a missing folder never stops the container) and, for network mounts, `propagation: rslave` (a mount that appears after the container started still shows up inside it).
+- **One data folder** `DATA_DIR` → `/data` (read-only, `rslave`, `create_host_path`): `models/<engine>/` (`scripts/fetch-models.sh -d <DATA_DIR>/models`) and `voices/` (own Piper voices). It may be a network share: if it is not mounted yet when the container starts, the models are missing, the server exits, Docker restarts it, and the share appears inside the container once the host mounts it (`rslave`). An optional extra voice folder (`EXTRA_VOICES_DIR` → `/voices-extra`).
 - Log rotation 3 × 10 MB.

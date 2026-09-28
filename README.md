@@ -5,8 +5,11 @@ container, on the GPU you already have: the integrated graphics of a mini PC or 
 
 - **Speech-to-text:** NVIDIA **Parakeet** TDT 0.6b v3 and OpenAI **Whisper**, both through
   [whisper.cpp](https://github.com/ggml-org/whisper.cpp) (ggml, Vulkan backend).
-- **Text-to-speech:** [**Piper**](https://github.com/OHF-Voice/piper1-gpl) voices through ONNX Runtime's WebGPU
-  execution provider (Dawn on Vulkan), with streaming, and whole folders of voices offered to Home Assistant.
+- **Text-to-speech:** [**Piper**](https://github.com/OHF-Voice/piper1-gpl), [**Kokoro-82M**](https://huggingface.co/hexgrad/Kokoro-82M)
+  (42 voices, 7 languages) and [**KittenTTS**](https://github.com/KittenML/KittenTTS) nano (8 voices), all through
+  ONNX Runtime's WebGPU execution provider (Dawn on Vulkan), with sentence streaming. Every voice of every engine
+  appears in one list in Home Assistant, e.g. `Kokoro af_heart [Intel(R) Graphics (ADL-N)]`, loaded on first use;
+  whole folders of Piper voices are picked up automatically.
 - **One stack, several choices in Home Assistant:** every port is its own speech-to-text entity (Parakeet on one,
   Whisper on the other; the voices are offered with Parakeet), and all of them share one process and one GPU.
 - **Only Vulkan / Mesa:** no CUDA, no Intel compute runtime, no OpenVINO. If the GPU is missing, the server either
@@ -34,11 +37,17 @@ Six English voice commands of 1.5–3.4 s (`tests/data/en`), time from the end o
 \* measured on an earlier set of the same six sentences, spoken by a different synthetic voice (Parakeet and Whisper
 small got 5/6 on that set).
 
-| Text-to-speech (Piper) | Result |
-|---|---|
-| high-quality voice | first audio after 0.6–0.7 s, real-time factor 0.39–0.45 (about 1.8× faster than the CPU) |
-| medium-quality voice | real-time factor ~0.12 |
-| a voice from a folder, first use | loads in ~2.5 s once |
+Text-to-speech, 30 sentences per voice, transcribed back by Parakeet (`tests/tts_roundtrip.py`); real-time factor
+(RTF) = synthesis time / audio length:
+
+| Text-to-speech | Word error | RTF on the iGPU | RTF on the CPU | Notes |
+|---|---|---|---|---|
+| KittenTTS nano (8 voices) | 0 % | **0.14–0.16** | 0.29 | ~0.6 s per sentence; the larger mini/micro models were 5–10× slower |
+| Piper, medium voice | – | ~0.12 | – | |
+| Piper, high voice | 0.8 % | 0.39–0.47 | ~0.7 | first audio 0.6–0.7 s |
+| Kokoro-82M fp32 (4 voices tested) | 0–0.7 % | 0.76–0.79 | ~1.0 | ~2.5 s for a 3 s sentence; fp16 exports produce NaNs on WebGPU |
+
+A folder voice or a voice pack loads on first use (Piper voice ~2.5 s, Kokoro ~3–7 s, Kitten ~2.6 s).
 
 Start-up (loading and warming up Parakeet, Whisper small and one voice): ~17 s. Speech-to-text and text-to-speech at
 the same moment share the GPU (each ~1.5–2× slower). Without the GPU (CPU fallback on the same machine): Parakeet
@@ -57,13 +66,13 @@ the same moment share the GPU (each ~1.5–2× slower). Without the GPU (CPU fal
 ```bash
 git clone https://github.com/jdbridge/wyoming-vulkan.git && cd wyoming-vulkan
 docker build -t wyoming-vulkan:latest .
-scripts/fetch-models.sh -d deploy/models parakeet-q8_0 whisper-small
-scripts/fetch-models.sh -d deploy/voices piper-en_US-ljspeech-high
+scripts/fetch-models.sh -d deploy/data/models   # Parakeet, Whisper small, a Piper voice, Kokoro, KittenTTS
 cp deploy/.env.example deploy/.env
 ```
 
 Edit `deploy/.env`: at least `RENDER_GID` (`getent group render`), `RENDER_DEVICE` if the GPU is not
-`/dev/dri/renderD128`, and `PUID`/`PGID` (a user that can read the model and voice folders). Then:
+`/dev/dri/renderD128`, and `PUID`/`PGID` (a user that can read the data folder). `DATA_DIR` (default
+`deploy/data`) holds `models/<engine>/` and `voices/` (your own Piper voices); it can be a network share. Then:
 
 ```bash
 cd deploy && docker compose up -d && docker compose logs -f
@@ -86,10 +95,10 @@ config when it runs without Compose.
 | Topic | How |
 |---|---|
 | Device | `WYOMING_DEVICE=auto` (GPU, else CPU with a warning), `igpu` (refuse to start without the GPU), `cpu` |
-| Other models | `PARAKEET_MODEL`, `WHISPER_MODEL` (`scripts/fetch-models.sh --list`) |
+| Other models | `PARAKEET_MODEL`, `WHISPER_MODEL` in `DATA_DIR/models/parakeet` and `…/whisper` (`scripts/fetch-models.sh --list`) |
 | Languages | `PARAKEET_LANGUAGES` (default `en`, `auto` = all 25 of Parakeet v3); Whisper offers all of its languages |
 | Whisper speed | `WHISPER_AUDIO_CTX=512` (~10 s window, ~3× faster; longer audio uses the full window automatically), `0` = always 30 s |
-| Voices | the default voice in `VOICES_DIR`; every `<name>.onnx` + `<name>.onnx.json` in `VOICES_DIR`, `VOICE_LIBRARY_DIR` (subfolders too) and `EXTRA_VOICES_DIR` is offered to Home Assistant and loaded on first use (`MAX_LOADED_VOICES` at once). New files appear within ~30 s, no restart |
+| Voices | the default Piper voice `DEFAULT_VOICE` in `DATA_DIR/models/piper`; every `<name>.onnx` + `<name>.onnx.json` there, in `DATA_DIR/voices` (subfolders too) and in `EXTRA_VOICES_DIR` is offered to Home Assistant, plus the Kokoro and Kitten voices (`[[tts_pack]]` in the inline config). All load on first use; new files appear within ~30 s, no restart |
 | Speaking speed and style | `PIPER_LENGTH_SCALE` (speed: > 1 slower), `PIPER_NOISE_SCALE` (expressiveness), `PIPER_NOISE_W` (rhythm) for every voice; empty = each voice's own value from its `.onnx.json`. Per voice: `[voice_settings."<voice>"]` in the inline config |
 | More endpoints | add `[[endpoint]]` blocks to the inline config (and their ports). An endpoint may also list several engines: a request then goes to the first one that supports its language |
 
@@ -102,6 +111,7 @@ voice is offered only once its files have stopped changing.
 tests/run.sh          # build, unit tests, then a real server on the GPU: both STT ports, TTS, voices, concurrency
 tests/run.sh cpu      # the same without a GPU: everything must fall back to the CPU and still pass
 tests/check_abi.sh    # the ctypes structs against the pinned C headers (after changing a binding or the pin)
+python tests/tts_roundtrip.py --help   # (in the image) every voice speaks, Parakeet transcribes, word error rate
 ```
 
 `tests/run.sh` uses `deploy/.env` (or `.env.example`), renders the stack's inline config and tests exactly that.
@@ -145,6 +155,7 @@ the compose file to its driver file (e.g. `radeon_icd.json` for AMD) and `GPU_NA
 
 ## Licence
 
-GPL-3.0 (see `LICENSE`), matching piper-tts, which the image includes. Components: whisper.cpp and ggml (MIT), ONNX Runtime (MIT), the
-wyoming library (MIT), piper-tts (GPL-3.0), Parakeet models (CC-BY-4.0, NVIDIA), Whisper models (MIT, OpenAI). Every
-Piper voice has its own licence; none is included.
+GPL-3.0 (see `LICENSE`), matching piper-tts, which the image includes. Components: whisper.cpp and ggml (MIT), ONNX
+Runtime (MIT), the wyoming library (MIT), piper-tts (GPL-3.0), kokoro-onnx (MIT), phonemizer and espeak-ng (GPL-3.0),
+Parakeet models (CC-BY-4.0, NVIDIA), Whisper models (MIT, OpenAI), Kokoro-82M and KittenTTS models (Apache-2.0). Every
+Piper voice has its own licence; the image contains no models or voices.

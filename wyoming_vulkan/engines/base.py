@@ -2,8 +2,9 @@
 
 import logging
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
-from typing import Optional
+import threading
+from dataclasses import dataclass, field
+from typing import Any, Optional
 
 import numpy as np
 
@@ -99,6 +100,24 @@ class SttEngine(Engine):
 @dataclass
 class SynthesisOptions:
     speaker: Optional[str] = None
+    voice: Optional[str] = None  # a voice pack's voice id (TtsPack)
+    settings: dict[str, Any] = field(default_factory=dict)  # a pack voice's speech settings ([voice_settings])
+
+
+def to_pcm16(audio, normalize: bool = True) -> bytes:
+    """Float audio -> int16 PCM bytes, peak-normalised per sentence like piper-tts (so every engine is as loud)."""
+    import numpy as np
+
+    audio = np.asarray(audio, dtype=np.float32).reshape(-1)
+    if normalize:
+        peak = float(np.max(np.abs(audio))) if audio.size else 0.0
+        audio = np.zeros_like(audio) if peak < 1e-8 or not np.isfinite(peak) else audio / peak
+    return (np.clip(audio, -1.0, 1.0) * 32767.0).astype(np.int16).tobytes()
+
+
+# espeak-ng keeps process-global state: phonemising from two threads at once corrupts the phonemes. Every engine
+# that uses espeak (Piper, Kokoro, KittenTTS) holds this lock while phonemising (only then, not during inference).
+ESPEAK_LOCK = threading.Lock()
 
 
 class TtsEngine(Engine):
@@ -109,3 +128,16 @@ class TtsEngine(Engine):
     @abstractmethod
     def synthesize(self, text: str, options: SynthesisOptions) -> bytes:
         """int16 mono PCM at self.sample_rate for one sentence (the handler splits sentences). Thread-safe."""
+
+
+class TtsPack(TtsEngine):
+    """One model with many voices (Kokoro, KittenTTS). Offered to HA as "<pack name>_<voice id>"."""
+
+    @abstractmethod
+    def list_voices(self) -> list[tuple[str, list[str]]]:
+        """(voice id, languages) for every voice, without loading the model (reads only small files)."""
+
+    def speed(self, options: SynthesisOptions) -> float:
+        """The model's speed input from the speech settings: speed = 1 / length_scale (Piper's convention)."""
+        value = options.settings.get("length_scale", self.config.options.get("length_scale"))
+        return 1.0 / float(value) if value not in (None, "") else 1.0

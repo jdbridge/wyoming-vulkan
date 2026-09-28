@@ -14,6 +14,8 @@ models/
 voices/
 voice-library/
 voices-extra/
+deploy/data/
+data/
 deploy/models/
 deploy/voices/
 deploy/voice-library/

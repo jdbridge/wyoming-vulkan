@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import AsyncIterator, Callable, Optional
 
 from .config import EngineConfig, GpuConfig, LibraryConfig
-from .engines.base import TtsEngine
+from .engines.base import SynthesisOptions, TtsEngine, TtsPack
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -104,6 +104,40 @@ def _strip_language(name: str) -> str:
     return name[m.end():] if m else name
 
 
+ENGINE_TITLES = {"piper": "Piper", "kokoro": "Kokoro", "kitten": "Kitten"}  # HA shows "<Engine> <voice> [<device>]"
+
+
+def _title(backend: str) -> str:
+    return ENGINE_TITLES.get(backend, backend.capitalize())
+
+
+@dataclass
+class _Pack:
+    """A voice pack (one model, many voices), loaded on first use and then kept."""
+
+    engine: TtsPack
+    voices: dict[str, list[str]]  # voice id -> languages
+    loaded: bool = False
+    failed: Optional[str] = None
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+
+
+class _PackVoice:
+    """What `use()` hands out for a pack voice: the pack's engine bound to one voice and its speech settings."""
+
+    def __init__(self, engine: TtsPack, voice: str, name: str, settings: dict) -> None:
+        self.engine, self.voice, self.name, self.settings = engine, voice, name, settings
+        self.config = engine.config
+        self.runtime = engine.runtime
+
+    @property
+    def sample_rate(self) -> int:
+        return self.engine.sample_rate
+
+    def synthesize(self, text: str, options: SynthesisOptions) -> bytes:
+        return self.engine.synthesize(text, SynthesisOptions(speaker=options.speaker, voice=self.voice, settings=self.settings))
+
+
 class VoiceRegistry:
     def __init__(
         self,
@@ -122,6 +156,8 @@ class VoiceRegistry:
         self.max_loaded = max(1, max_loaded)
         self.factory = factory
         self.library_voices: dict[str, _LibraryVoice] = {}
+        self.packs: dict[str, _Pack] = {}  # pack name -> pack
+        self.pack_voices: dict[str, tuple[_Pack, str]] = {}  # "<pack>_<voice>" -> (pack, voice id)
         self._scanned: dict[int, dict] = {}  # library index -> last good scan
         self._scan_pool = [ThreadPoolExecutor(1, thread_name_prefix=f"scan{i}") for i in range(len(libraries))]
         self._scan_futures: dict[int, asyncio.Future] = {}
@@ -130,6 +166,44 @@ class VoiceRegistry:
         self._seen: dict[tuple[int, str], tuple[Signature, float]] = {}  # (library, name) -> (signature, first seen)
         self._scanned_once: set[int] = set()  # libraries with at least one successful scan
         self._last_refresh = 0.0
+
+    # ---- voice packs ----
+
+    async def add_packs(self, engines: list[TtsPack]) -> None:
+        """List each pack's voices (small files only, in a thread with a timeout: they may be on a network share).
+        A pack whose files cannot be read is left out with a warning; it never stops the server."""
+        for engine in engines:
+            try:
+                voices = await asyncio.wait_for(asyncio.to_thread(engine.list_voices), SCAN_TIMEOUT_S * 2)
+            except Exception as err:  # missing files, NAS not answering
+                _LOGGER.warning("tts pack %s: cannot list voices (%s); its voices are not offered", engine.name, err or type(err).__name__)
+                continue
+            if not voices:
+                _LOGGER.warning("tts pack %s: no voices found; nothing offered", engine.name)
+                continue
+            pack = _Pack(engine, dict(voices))
+            self.packs[engine.name] = pack
+            for voice, _languages in voices:
+                self.pack_voices[f"{engine.name}_{voice}"] = (pack, voice)
+            _LOGGER.info("tts pack %s: %d voices, loaded on first use", engine.name, len(voices))
+
+    async def _ensure_pack(self, pack: _Pack) -> bool:
+        async with pack.lock:
+            if pack.loaded:
+                return True
+            if pack.failed:
+                return False
+            t = time.perf_counter()
+            try:
+                await asyncio.wait_for(asyncio.to_thread(pack.engine.load), LOAD_TIMEOUT_S)
+                await asyncio.wait_for(asyncio.to_thread(pack.engine.warm_up), LOAD_TIMEOUT_S)
+            except Exception as err:
+                pack.failed = str(err) or type(err).__name__
+                _LOGGER.error("tts pack %s could not be loaded: %s; its voices use the default voice", pack.engine.name, pack.failed)
+                return False
+            pack.loaded = True
+            _LOGGER.info("tts pack %s loaded on demand in %.1f s on %s", pack.engine.name, time.perf_counter() - t, pack.engine.runtime.summary())
+            return True
 
     # ---- scanning ----
 
@@ -219,23 +293,32 @@ class VoiceRegistry:
         """Where a not-yet-loaded voice would run: as the loaded voices on the same kind of device do."""
         if device == "cpu":
             return "CPU"
-        for e in list(self.fixed.values()) + [v.engine for v in self.library_voices.values() if v.engine]:
+        loaded = list(self.fixed.values()) + [v.engine for v in self.library_voices.values() if v.engine]
+        loaded += [p.engine for p in self.packs.values() if p.loaded]
+        for e in loaded:
             if e.config.device != "cpu":
                 return e.runtime.label()
         return "not loaded"
 
     def voices(self) -> list[VoiceInfo]:
         out = [
-            VoiceInfo(e.name, f"{e.config.description or _strip_language(e.name)} [{e.runtime.label()}]", e.languages, e.config.backend)
+            VoiceInfo(e.name, f"{e.config.description or _title(e.config.backend) + ' ' + _strip_language(e.name)} [{e.runtime.label()}]",
+                      e.languages, e.config.backend)
             for e in self.fixed.values()
         ]
         for v in self.library_voices.values():
             label = v.engine.runtime.label() if v.engine else self._predicted_label(v.library.device)
-            out.append(VoiceInfo(v.name, f"{_strip_language(v.name)} [{label}]", v.languages, v.library.backend))
+            out.append(VoiceInfo(v.name, f"{_title(v.library.backend)} {_strip_language(v.name)} [{label}]", v.languages, v.library.backend))
+        for name, (pack, voice) in self.pack_voices.items():
+            if pack.failed:
+                continue
+            label = pack.engine.runtime.label() if pack.loaded else self._predicted_label(pack.engine.config.device)
+            title = pack.engine.config.description or _title(pack.engine.config.backend)
+            out.append(VoiceInfo(name, f"{title} {voice} [{label}]", pack.voices[voice], pack.engine.config.backend))
         return out
 
     def names(self) -> list[str]:
-        return list(self.fixed) + list(self.library_voices)
+        return list(self.fixed) + list(self.library_voices) + list(self.pack_voices)
 
     # ---- using a voice ----
 
@@ -252,6 +335,13 @@ class VoiceRegistry:
         """The engine for a voice, loading a library voice if needed. Unknown or failing voices -> the default."""
         if name in self.fixed:
             yield self.fixed[name]
+            return
+        if name in self.pack_voices:
+            pack, voice = self.pack_voices[name]
+            if await self._ensure_pack(pack):
+                yield _PackVoice(pack.engine, voice, name, self.speech_options(name, pack.engine.config.options))
+            else:
+                yield self.default()
             return
         entry = self.library_voices.get(name) if name else None
         if entry is None:

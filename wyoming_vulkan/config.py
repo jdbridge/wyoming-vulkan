@@ -82,6 +82,8 @@ class Config:
     stt: list[EngineConfig]
     tts: list[EngineConfig]
     tts_library: list[LibraryConfig] = field(default_factory=list)
+    # voice packs ([[tts_pack]]): one model with many voices (Kokoro, KittenTTS); name = the voice-id prefix
+    tts_pack: list[EngineConfig] = field(default_factory=list)
     endpoint: list[EndpointConfig] = field(default_factory=list)  # extra endpoints ([[endpoint]])
     # speech settings by voice name, "*" = every voice: {"*": {"noise_w": 0.6}, "en_US-x-high": {"length_scale": 1.1}}
     voice_settings: dict[str, dict[str, Any]] = field(default_factory=dict)
@@ -192,7 +194,7 @@ def _endpoint(i: int, data: dict) -> EndpointConfig:
 def load_config(path: Path) -> Config:
     with open(path, "rb") as f:
         raw = tomllib.load(f)
-    unknown = set(raw) - {"server", "gpu", "stt", "tts", "tts_library", "endpoint", "voice_settings"}
+    unknown = set(raw) - {"server", "gpu", "stt", "tts", "tts_library", "tts_pack", "endpoint", "voice_settings"}
     if unknown:
         raise ConfigError(f"unknown sections {sorted(unknown)}")
     config = Config(
@@ -201,12 +203,13 @@ def load_config(path: Path) -> Config:
         stt=[_engine("stt", i, d) for i, d in enumerate(raw.get("stt", []))],
         tts=[_engine("tts", i, d) for i, d in enumerate(raw.get("tts", []))],
         tts_library=[lib for i, d in enumerate(raw.get("tts_library", [])) for lib in _libraries(i, d)],
+        tts_pack=[_engine("tts", i, {"device": "auto", **d}) for i, d in enumerate(raw.get("tts_pack", []))],
         endpoint=[_endpoint(i, d) for i, d in enumerate(raw.get("endpoint", []))],
         voice_settings=_voice_settings(raw.get("voice_settings", {})),
     )
-    if not (config.stt or config.tts or config.tts_library):
-        raise ConfigError("no [[stt]], [[tts]] or [[tts_library]] configured")
-    for engines in (config.stt, config.tts):
+    if not (config.stt or config.tts or config.tts_library or config.tts_pack):
+        raise ConfigError("no [[stt]], [[tts]], [[tts_library]] or [[tts_pack]] configured")
+    for engines in (config.stt, config.tts, config.tts_pack):
         names = [e.name for e in engines]
         if len(names) != len(set(names)):
             raise ConfigError(f"duplicate engine names: {names}")

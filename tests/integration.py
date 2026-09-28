@@ -240,7 +240,7 @@ async def main() -> None:
 
         print(f"voice library ({len(info.tts[0].voices)} voices)")
         check(len(info.tts[0].voices) >= args.min_voices, f"at least {args.min_voices} voices offered")
-        others = [x.name for x in info.tts[0].voices if x.name != voice]
+        others = [x.name for x in info.tts[0].voices if x.name != voice and not x.name.startswith(("kokoro_", "kitten_"))]
         if others:
             lib_voice = next((n for n in others if "medium" in n), others[0])
             text = "The front door is locked and the lights are off."
@@ -253,6 +253,22 @@ async def main() -> None:
             again = await describe(uri)
             desc = next(x.description for x in again.tts[0].voices if x.name == lib_voice)
             check(runs_on(desc) in ("igpu", "cpu"), f"loaded library voice states where it runs ({desc})")
+
+        for prefix in ("kokoro_", "kitten_"):
+            pack_voices = [x.name for x in info.tts[0].voices if x.name.startswith(prefix)]
+            if not pack_voices:
+                continue
+            name = pack_voices[0]
+            print(f"voice pack {prefix[:-1]} ({len(pack_voices)} voices), {name}")
+            text = "The front door is locked and the lights are off."
+            cold = await synthesize(uri, [Synthesize(text=text, voice=SynthesizeVoice(name=name)).event()], "audio-stop")
+            warm = await synthesize(uri, [Synthesize(text=text, voice=SynthesizeVoice(name=name)).event()], "audio-stop")
+            print(f"       first use {cold.total_s:.2f} s (loads the pack), then {warm.total_s:.3f} s for {warm.seconds:.2f} s audio at {warm.rate} Hz (RTF {warm.total_s / max(warm.seconds, 1e-6):.2f})")
+            check(cold.types == ONE_BLOCK and cold.seconds > 1.0, f"{name} speaks")
+            check(cold.total_s <= 30.0, f"{name}: first use incl. loading within 30 s ({cold.total_s:.2f})")
+            desc = next(x.description for x in (await describe(uri)).tts[0].voices if x.name == name)
+            check(runs_on(desc) in ("igpu", "cpu") and (args.expect == "any" or runs_on(desc) == args.expect),
+                  f"{name} states where it runs ({desc})")
 
         print("text-to-speech edge cases")
         r = await synthesize(uri, [Synthesize(text="  ", voice=v).event()], "audio-stop")

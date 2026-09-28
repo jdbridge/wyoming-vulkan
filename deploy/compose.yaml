@@ -4,7 +4,9 @@
 #
 # Build the image first (Dockge cannot build it, it does not see the project folder):
 #   docker build -t wyoming-vulkan:latest .        (in the project folder; tests/run.sh builds and tests it)
-# Models and voices: scripts/fetch-models.sh (see README.md).
+# Data: DATA_DIR holds models/<engine>/ (scripts/fetch-models.sh -d <DATA_DIR>/models) and voices/ (your own
+# Piper voices, subfolders allowed). It may be a network share: the bind uses rslave propagation, so a share that is
+# mounted after the container started still appears (until then the server exits and Docker restarts it).
 services:
   wyoming-vulkan:
     image: ${WYOMING_VULKAN_IMAGE:-wyoming-vulkan:latest}
@@ -26,15 +28,12 @@ services:
       - source: wyoming_vulkan_config
         target: /etc/wyoming-vulkan/config.toml
     volumes:
-      - ${MODELS_DIR:-./models}:/models:ro   # speech-to-text models (scripts/fetch-models.sh)
-      - ${VOICES_DIR:-./voices}:/voices:ro   # the default voice, and a voice folder
-      # Optional voice folders (a missing or unreachable folder only removes its voices). The long form with rslave
-      # propagation lets a network mount (NFS/SMB) that appears after the container started show up inside it.
       - type: bind
-        source: ${VOICE_LIBRARY_DIR:-./voice-library}
-        target: /voices-library
+        source: ${DATA_DIR:-./data}
+        target: /data
         read_only: true
         bind: { propagation: rslave, create_host_path: true }
+      # Optional extra voice folder (a missing or unreachable folder only removes its voices)
       - type: bind
         source: ${EXTRA_VOICES_DIR:-./voices-extra}
         target: /voices-extra
@@ -66,7 +65,7 @@ configs:
       [[stt]]
       name = "parakeet"
       backend = "parakeet.cpp"
-      model = "/models/${PARAKEET_MODEL:-ggml-parakeet-tdt-0.6b-v3-q8_0.bin}"
+      model = "/data/models/parakeet/${PARAKEET_MODEL:-ggml-parakeet-tdt-0.6b-v3-q8_0.bin}"
       device = "${WYOMING_DEVICE:-auto}"
       languages = "${PARAKEET_LANGUAGES:-en}"   # comma-separated, or auto (all 25 of Parakeet v3)
       description = "Parakeet"
@@ -75,7 +74,7 @@ configs:
       [[stt]]
       name = "whisper"
       backend = "whisper.cpp"
-      model = "/models/${WHISPER_MODEL:-ggml-small.bin}"
+      model = "/data/models/whisper/${WHISPER_MODEL:-ggml-small.bin}"
       device = "${WYOMING_DEVICE:-auto}"
       languages = "auto"                 # every Whisper language (only "en" for .en models)
       description = "${WHISPER_DESCRIPTION:-Whisper small}"
@@ -85,12 +84,26 @@ configs:
       [[tts]]                            # the default voice: loaded and warmed up at start
       name = "${DEFAULT_VOICE:-en_US-ljspeech-high}"
       backend = "piper"
-      model = "/voices/${DEFAULT_VOICE:-en_US-ljspeech-high}.onnx"
+      model = "/data/models/piper/${DEFAULT_VOICE:-en_US-ljspeech-high}.onnx"
       device = "${WYOMING_DEVICE:-auto}"
       languages = ["${DEFAULT_VOICE_LANGUAGE:-en_US}"]
 
+      # Voice packs: one model, many voices, offered as "<pack>_<voice>" ("Kokoro af_heart [<device>]" in HA) and
+      # loaded on first use. Missing files only leave the pack out (warning in the log).
+      [[tts_pack]]
+      name = "kokoro"                    # Kokoro-82M: 42 voices, English (US/GB), es, fr, hi, it, pt
+      backend = "kokoro"
+      model = "/data/models/kokoro/model.onnx"
+      device = "${WYOMING_DEVICE:-auto}"
+
+      [[tts_pack]]
+      name = "kitten"                    # KittenTTS nano (15M, the fastest engine here): 8 English voices
+      backend = "kitten"
+      model = "/data/models/kitten/kitten_tts_nano_v0_8.onnx"
+      device = "${WYOMING_DEVICE:-auto}"
+
       # Piper speech settings for every voice; empty = the voice's own value (the "inference" section of its
-      # .onnx.json, typically length_scale 1.0, noise_scale 0.667, noise_w 0.8).
+      # .onnx.json, typically length_scale 1.0, noise_scale 0.667, noise_w 0.8). Kokoro and Kitten use length_scale.
       #   length_scale  speaking speed: > 1 slower, < 1 faster
       #   noise_scale   variation / expressiveness of the audio
       #   noise_w       variation of phoneme durations (rhythm)
@@ -102,14 +115,16 @@ configs:
       # Per voice (by voice name; overrides the values above), e.g.:
       # [voice_settings."en_US-ljspeech-high"]
       # length_scale = 1.1
+      # [voice_settings."kokoro_af_heart"]
+      # length_scale = 0.95
 
-      # Voice folders, offered to Home Assistant and loaded on first use; a name found in an earlier folder wins.
+      # Piper voice folders, offered to Home Assistant and loaded on first use; a name found in an earlier folder wins.
       [[tts_library]]
-      path = "/voices"
+      path = "/data/models/piper"
       device = "${WYOMING_DEVICE:-auto}"
 
       [[tts_library]]
-      path = "/voices-library"
+      path = "/data/voices"
       device = "${WYOMING_DEVICE:-auto}"
       optional = true
       recursive = true

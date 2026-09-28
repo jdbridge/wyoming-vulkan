@@ -20,14 +20,12 @@ AUDIO_DE=${AUDIO_DE:-$PWD/tests/data/de}
 # a value from the env file (default if unset); relative paths are relative to deploy/, as in compose
 val() { local v; v=$(grep -E "^$1=" "$ENV_FILE" | tail -1 | cut -d= -f2- | sed -e 's/^"//' -e 's/"$//'); echo "${v:-$2}"; }
 path() { local p; p=$(val "$1" "$2"); [[ $p == /* ]] && echo "$p" || echo "$PWD/deploy/${p#./}"; }
-MODELS=$(path MODELS_DIR ./models)
-VOICES=$(path VOICES_DIR ./voices)
-LIBRARY=$(path VOICE_LIBRARY_DIR ./voice-library)
+DATA=$(path DATA_DIR ./data)
 EXTRA=$(path EXTRA_VOICES_DIR ./voices-extra)
 RENDER_DEVICE=$(val RENDER_DEVICE /dev/dri/renderD128)
 RENDER_GID=$(val RENDER_GID 993)
 USER_ID="$(val PUID 1000):$(val PGID 1000)"
-echo "== env file $ENV_FILE: models $MODELS, voices $VOICES, GPU $RENDER_DEVICE (group $RENDER_GID), user $USER_ID"
+echo "== env file $ENV_FILE: data $DATA, GPU $RENDER_DEVICE (group $RENDER_GID), user $USER_ID"
 
 # The stack's server config: the inline config of deploy/compose.yaml with the env file filled in
 CONFIG=$(mktemp -d)/config.toml
@@ -44,16 +42,14 @@ echo "== integration ($MODE)"
 # (docker run --device cannot take by-path names, their colons clash with its syntax: resolve the link first)
 GPU=(--device "$(readlink -f "$RENDER_DEVICE"):/dev/dri/renderD128" --group-add "$RENDER_GID")
 FOLDERS=()
-for dir_target in "$LIBRARY:/voices-library" "$EXTRA:/voices-extra"; do
-  [[ -d ${dir_target%%:/*} ]] && FOLDERS+=(--mount "type=bind,source=${dir_target%%:/*},target=/${dir_target#*:/},readonly,bind-propagation=rslave")
-done
+[[ -d $EXTRA ]] && FOLDERS+=(--mount "type=bind,source=$EXTRA,target=/voices-extra,readonly")
 MIN_VOICES=1
 WHISPER_LIMIT=1.5   # Whisper small with a ~10 s window: 0.82-0.97 s on an Intel N305 iGPU (2026-09-28)
 if [[ $MODE == cpu ]]; then GPU=(); FOLDERS=(); WHISPER_LIMIT=6; fi
 docker rm -f "$NAME" >/dev/null 2>&1 || true
 trap 'docker rm -f "$NAME" >/dev/null 2>&1 || true' EXIT
 docker run -d --name "$NAME" "${GPU[@]}" --health-interval=3s --user "$USER_ID" \
-  -v "$MODELS:/models:ro" -v "$VOICES:/voices:ro" "${FOLDERS[@]}" -v "$CONFIG:/etc/wyoming-vulkan/config.toml:ro" \
+  --mount "type=bind,source=$DATA,target=/data,readonly,bind-propagation=rslave" "${FOLDERS[@]}" -v "$CONFIG:/etc/wyoming-vulkan/config.toml:ro" \
   -v "$AUDIO:/testdata:ro" -v "$AUDIO_DE:/testdata-de:ro" -v "$PWD/tests:/tests:ro" "$IMAGE" >/dev/null
 for _ in $(seq 1 60); do
   status=$(docker inspect -f '{{.State.Status}} {{.State.Health.Status}}' "$NAME")

@@ -7,3 +7,6 @@ piper-tts==1.8.0               # 2026-09-04, latest; wyoming-piper 2.5.2 require
 wyoming==1.10.2                # 2026-08-27, latest; wyoming-piper 2.5.2 and wyoming-faster-whisper 3.8.1 require >= 1.10.2
 sentence-stream==1.3.0         # 2026-01-08, latest; sentence splitting for streaming TTS, as in wyoming-piper
 numpy==2.5.3                   # 2026-09-06, latest
+kokoro-onnx==0.6.1             # 2026-08-19, latest; Kokoro's text front end (espeak via phonemizer); our own ORT session
+phonemizer==3.4.0              # KittenTTS's text front end (as in its reference code) and kokoro-onnx's
+espeakng-loader==0.2.4         # espeak-ng library + data for phonemizer (GPL-3.0, like piper's espeak)

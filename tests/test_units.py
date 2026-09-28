@@ -27,7 +27,7 @@ from wyoming.tts import Synthesize, SynthesizeChunk, SynthesizeStart, Synthesize
 from wyoming_vulkan import devices
 from wyoming_vulkan.config import ConfigError, EngineConfig, GpuConfig, ServerConfig, load_config
 from wyoming_vulkan.engines import create_engine
-from wyoming_vulkan.engines.base import GpuUnavailable, SttEngine, TtsEngine
+from wyoming_vulkan.engines.base import GpuUnavailable, SttEngine, SynthesisOptions, TtsEngine, TtsPack
 from wyoming_vulkan.handler import Services, WyomingHandler
 from wyoming_vulkan.info import build_info
 from wyoming_vulkan import voices as voices_module
@@ -69,11 +69,13 @@ class ConfigTests(unittest.TestCase):
         c = load_config(path)
         self.assertEqual(
             [(str(l.path), l.optional, l.recursive) for l in c.tts_library],
-            [("/voices", False, False), ("/voices-library", True, True), ("/voices-extra", True, False)],
+            [("/data/models/piper", False, False), ("/data/voices", True, True), ("/voices-extra", True, False)],
         )
+        self.assertEqual([(p.name, p.backend, str(p.model.parent)) for p in c.tts_pack],
+                         [("kokoro", "kokoro", "/data/models/kokoro"), ("kitten", "kitten", "/data/models/kitten")])
         self.assertEqual([(ep.stt, ep.tts) for ep in c.endpoints], [(["parakeet"], True), (["whisper"], False)])
         self.assertEqual({e.device for e in c.stt + c.tts + c.tts_library}, {"auto"})
-        self.assertEqual(c.tts[0].model, Path(f"/voices/{c.tts[0].name}.onnx"))
+        self.assertEqual(c.tts[0].model, Path(f"/data/models/piper/{c.tts[0].name}.onnx"))
 
     def test_library_config(self):
         c = load_config(write(MINIMAL + '[[tts_library]]\npath = "/v"\nlength_scale = 1.1\n'))
@@ -468,7 +470,7 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(r.names(), ["en_US-fixed-high", "en_US-one-high", "en_US-two-medium", "en_US-cpu-low"])
         self.assertEqual(
             [v.description for v in r.voices()],
-            ["fixed-high [Fake GPU]", "one-high [Fake GPU]", "two-medium [Fake GPU]", "cpu-low [CPU]"],
+            ["Fake fixed-high [Fake GPU]", "Piper one-high [Fake GPU]", "Piper two-medium [Fake GPU]", "Piper cpu-low [CPU]"],
         )  # not-yet-loaded voices show where they will run, predicted from the loaded ones
         self.assertEqual(r.library_voices["en_US-one-high"].path.parent, a)  # first folder wins
 
@@ -588,7 +590,7 @@ class HandlerLibraryTests(HandlerTests.__base__):
         [e] = await self.converse([Describe().event()], {"info"})
         voices = Info.from_event(e).tts[0].voices
         self.assertEqual([(v.name, v.description, v.languages) for v in voices], [
-            ("en_US-fixed-high", "fixed-high [Fake GPU]", ["en"]), ("en_US-lib-medium", "lib-medium [Fake GPU]", ["en_US"])])
+            ("en_US-fixed-high", "Fake fixed-high [Fake GPU]", ["en"]), ("en_US-lib-medium", "Piper lib-medium [Fake GPU]", ["en_US"])])
         await self.converse([Synthesize(text="Hi.", voice=SynthesizeVoice(name="en_US-lib-medium")).event()], {"audio-stop"})
         self.assertEqual(self.registry.loaded(), ["en_US-lib-medium"])
         self.assertEqual(self.registry.library_voices["en_US-lib-medium"].engine.texts, [("Hi.", None)])
@@ -707,6 +709,95 @@ noise_w = ""
 
     def test_folder_voice_gets_its_settings(self):
         self.assertEqual(asyncio.run(self._registry_options()), {"noise_scale": 0.4, "length_scale": 1.3})
+
+
+class FakePack(TtsPack):
+    """A voice pack for tests: two voices, records what it synthesised."""
+
+    def __init__(self, name="kokoro", fail_load=False, voices=("af_x", "bm_y")):
+        super().__init__(EngineConfig(kind="tts", name=name, backend="kokoro", model=Path("/m"), device="auto"), GpuConfig())
+        self.fail_load, self._voices, self.calls, self.loads = fail_load, voices, [], 0
+
+    @property
+    def sample_rate(self):
+        return 24000
+
+    def list_voices(self):
+        return [(v, ["en_US" if v.startswith("a") else "en_GB"]) for v in self._voices]
+
+    def _load(self, device):
+        self.loads += 1
+        if self.fail_load:
+            raise RuntimeError("model file broken")
+        self.runtime.actual, self.runtime.device_name = device, "Fake GPU"
+
+    def warm_up(self):
+        pass
+
+    def synthesize(self, text, options):
+        self.calls.append((text, options.voice, dict(options.settings)))
+        return b"\x01\x00" * 2400
+
+
+class VoicePackTests(unittest.IsolatedAsyncioTestCase):
+    async def registry(self, packs, settings=None):
+        c = load_config(write(MINIMAL + (settings or "")))
+        r = VoiceRegistry([FakeTts("en_US-fixed-high")], [], GpuConfig(), 2, FakeFactory(), c.speech_options)
+        await r.add_packs(packs)
+        return r
+
+    async def test_listing_and_names(self):
+        pack = FakePack()
+        r = await self.registry([pack])
+        info = {v.name: (v.description, v.languages) for v in r.voices()}
+        self.assertEqual(info["kokoro_af_x"], ("Kokoro af_x [Fake GPU]", ["en_US"]))  # predicted before loading
+        self.assertEqual(info["kokoro_bm_y"][1], ["en_GB"])
+        self.assertEqual(pack.loads, 0, "packs load on first use, not at start")
+
+    async def test_use_loads_once_and_passes_voice_and_settings(self):
+        pack = FakePack()
+        r = await self.registry([pack], '[voice_settings."kokoro_bm_y"]\nlength_scale = 1.2\n')
+        for name in ("kokoro_af_x", "kokoro_bm_y", "kokoro_af_x"):
+            async with r.use(name) as e:
+                self.assertEqual(e.sample_rate, 24000)
+                e.synthesize("Hi.", SynthesisOptions())
+        self.assertEqual(pack.loads, 1)
+        self.assertEqual([(v, s) for _, v, s in pack.calls], [("af_x", {}), ("bm_y", {"length_scale": 1.2}), ("af_x", {})])
+
+    async def test_broken_pack_uses_default_voice_and_disappears(self):
+        pack = FakePack(fail_load=True)
+        r = await self.registry([pack])
+        with self.assertLogs("wyoming_vulkan.voices", "ERROR"):
+            async with r.use("kokoro_af_x") as e:
+                self.assertEqual(e.name, "en_US-fixed-high")
+        self.assertNotIn("kokoro_af_x", [v.name for v in r.voices()])
+
+    async def test_unreadable_pack_is_left_out(self):
+        class Unreadable(FakePack):
+            def list_voices(self):
+                raise FileNotFoundError("/data/models/kokoro/voices")
+
+        with self.assertLogs("wyoming_vulkan.voices", "WARNING"):
+            r = await self.registry([Unreadable()])
+        self.assertEqual(r.names(), ["en_US-fixed-high"])
+
+    def test_pack_speed_from_length_scale(self):
+        pack = FakePack()
+        self.assertEqual(pack.speed(SynthesisOptions()), 1.0)
+        self.assertAlmostEqual(pack.speed(SynthesisOptions(settings={"length_scale": "1.25"})), 0.8)
+
+
+class FrontEndTests(unittest.TestCase):
+    def test_kitten_symbols_follow_the_reference(self):
+        from wyoming_vulkan.engines.kitten_ort import _PUNCTUATION, SYMBOL_IDS
+        # pad, then the 16 punctuation characters, then the letters (reference: TextCleaner in kittentts)
+        self.assertEqual((SYMBOL_IDS["$"], SYMBOL_IDS[";"], SYMBOL_IDS["A"]), (0, 1, 1 + len(_PUNCTUATION)))
+        self.assertEqual(SYMBOL_IDS["ˈ"], max(i for s, i in SYMBOL_IDS.items() if s == "ˈ"))
+
+    def test_kokoro_languages(self):
+        from wyoming_vulkan.engines.kokoro_ort import LANGUAGES
+        self.assertNotIn("j", LANGUAGES)
+        self.assertEqual(LANGUAGES["b"], ("en_GB", "en-gb"))
 
 
 if __name__ == "__main__":

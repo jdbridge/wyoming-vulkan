@@ -54,8 +54,14 @@ async def main() -> int:
     if args.uri:
         config.server.uri = args.uri
     if args.device:
-        for e in config.stt + config.tts + config.tts_library:
+        for e in config.stt + config.tts + config.tts_library + config.tts_pack:
             e.device = args.device
+    for section, entries, kind in (("[[tts]]", config.tts, "tts"), ("[[tts_pack]]", config.tts_pack, "tts_pack")):
+        for e in entries:
+            if BACKENDS.get(e.backend, ("",))[0] != kind:
+                have = sorted(b for b, (k, _) in BACKENDS.items() if k == kind)
+                _LOGGER.error("Config %s: %s %s: backend %r does not fit here (use one of %s)", args.config, section, e.name, e.backend, have)
+                return 2
     for lib in config.tts_library:
         if BACKENDS.get(lib.backend, ("",))[0] != "tts":
             _LOGGER.error("Config %s: [[tts_library]] %s: %r is not a TTS backend", args.config, lib.path, lib.backend)
@@ -94,6 +100,7 @@ async def main() -> int:
     voices = VoiceRegistry(
         tts, config.tts_library, config.gpu, config.server.max_loaded_voices, create_engine, config.speech_options
     )
+    await voices.add_packs([create_engine(cfg, config.gpu) for cfg in config.tts_pack])
     await voices.refresh()
     for i, lib in enumerate(config.tts_library):
         problem = voices.problem(i)
@@ -102,8 +109,9 @@ async def main() -> int:
             return 1
     library_names = [n for n in voices.names() if n not in {e.name for e in tts}]
     _LOGGER.info(
-        "Voices: %d fixed, %d from %d library folder(s), loaded on first use (max %d at once)",
-        len(tts), len(library_names), len(config.tts_library), config.server.max_loaded_voices,
+        "Voices: %d fixed, %d from %d folder(s) and %d from %d pack(s), loaded on first use (max %d folder voices at once)",
+        len(tts), len(library_names) - len(voices.pack_voices), len(config.tts_library), len(voices.pack_voices),
+        len(voices.packs), config.server.max_loaded_voices,
     )
     # One Wyoming server per endpoint, all sharing the loaded engines (HA: one STT entity per endpoint)
     by_name = {e.name: e for e in stt}

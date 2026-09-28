@@ -53,7 +53,10 @@ model = "/voices/en_US-ljspeech-high.onnx"   # config: <model>.json, or set `con
 device = "auto"
 languages = ["en_US"]
 # description: shown in HA as the voice's name, "<description> [<where it runs>]"; default: the name without "en_US-"
-# backend options (default: the voice's own values): length_scale, noise_scale, noise_w_scale
+# speech settings (default: the voice's own values from its .onnx.json "inference" section):
+# length_scale = 1.0              # speaking speed: > 1 slower, < 1 faster
+# noise_scale = 0.667             # variation / expressiveness of the audio
+# noise_w = 0.8                   # variation of phoneme durations (rhythm); also noise_w_scale
 # auto_punctuation = ".?!"        # appended to sentences without end punctuation
 
 [[tts_library]]                  # a folder of voices: every <name>.onnx + <name>.onnx.json is offered to HA and
@@ -65,3 +68,10 @@ recursive = false                # true: also scan subfolders
 min_age_seconds = 60             # files changed less than this long ago are skipped (still being written)
 # languages = ["en_US"]          # default: from the file name (en_US-...), else the voice's espeak voice
 # A voice that is also a fixed [[tts]] voice (same name) is served by the fixed one; the first folder wins otherwise.
+
+# Speech settings by voice name; "*" = every voice. Precedence (last wins): "*", the voice's [[tts]] / [[tts_library]]
+# entry, the voice's own table. Whatever is still unset comes from the voice's .onnx.json. Empty values count as unset.
+# [voice_settings."*"]
+# noise_w = 0.6
+# [voice_settings."en_US-ljspeech-high"]
+# length_scale = 1.1

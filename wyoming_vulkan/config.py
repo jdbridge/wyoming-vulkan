@@ -83,6 +83,17 @@ class Config:
     tts: list[EngineConfig]
     tts_library: list[LibraryConfig] = field(default_factory=list)
     endpoint: list[EndpointConfig] = field(default_factory=list)  # extra endpoints ([[endpoint]])
+    # speech settings by voice name, "*" = every voice: {"*": {"noise_w": 0.6}, "en_US-x-high": {"length_scale": 1.1}}
+    voice_settings: dict[str, dict[str, Any]] = field(default_factory=dict)
+
+    def speech_options(self, voice: str, entry_options: dict[str, Any]) -> dict[str, Any]:
+        """A voice's engine options with its speech settings merged in. Precedence (last wins): [voice_settings."*"],
+        the voice's [[tts]] / [[tts_library]] entry, [voice_settings."<voice>"]; the voice's own .onnx.json values
+        apply to whatever is still unset. Empty values count as unset."""
+        merged: dict[str, Any] = {}
+        for source in (self.voice_settings.get("*", {}), entry_options, self.voice_settings.get(voice, {})):
+            merged.update({k: v for k, v in source.items() if v != ""})
+        return merged
 
     @property
     def endpoints(self) -> list[EndpointConfig]:
@@ -153,6 +164,21 @@ def _libraries(i: int, data: dict) -> list[LibraryConfig]:
     return [LibraryConfig(path=Path(p), **known, options=dict(options)) for p in paths]
 
 
+SPEECH_SETTINGS = {"length_scale", "noise_scale", "noise_w", "noise_w_scale"}  # noise_w: Piper's .onnx.json name
+
+
+def _voice_settings(data: dict) -> dict[str, dict[str, Any]]:
+    out = {}
+    for voice, settings in data.items():
+        if not isinstance(settings, dict):
+            raise ConfigError(f"[voice_settings.\"{voice}\"] must be a table")
+        unknown = set(settings) - SPEECH_SETTINGS
+        if unknown:
+            raise ConfigError(f"[voice_settings.\"{voice}\"]: unknown keys {sorted(unknown)} (have {sorted(SPEECH_SETTINGS)})")
+        out[voice] = dict(settings)
+    return out
+
+
 def _endpoint(i: int, data: dict) -> EndpointConfig:
     where = f"[[endpoint]] #{i + 1}"
     unknown = set(data) - set(EndpointConfig.__dataclass_fields__)
@@ -166,7 +192,7 @@ def _endpoint(i: int, data: dict) -> EndpointConfig:
 def load_config(path: Path) -> Config:
     with open(path, "rb") as f:
         raw = tomllib.load(f)
-    unknown = set(raw) - {"server", "gpu", "stt", "tts", "tts_library", "endpoint"}
+    unknown = set(raw) - {"server", "gpu", "stt", "tts", "tts_library", "endpoint", "voice_settings"}
     if unknown:
         raise ConfigError(f"unknown sections {sorted(unknown)}")
     config = Config(
@@ -176,6 +202,7 @@ def load_config(path: Path) -> Config:
         tts=[_engine("tts", i, d) for i, d in enumerate(raw.get("tts", []))],
         tts_library=[lib for i, d in enumerate(raw.get("tts_library", [])) for lib in _libraries(i, d)],
         endpoint=[_endpoint(i, d) for i, d in enumerate(raw.get("endpoint", []))],
+        voice_settings=_voice_settings(raw.get("voice_settings", {})),
     )
     if not (config.stt or config.tts or config.tts_library):
         raise ConfigError("no [[stt]], [[tts]] or [[tts_library]] configured")

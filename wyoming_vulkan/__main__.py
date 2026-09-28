@@ -66,6 +66,8 @@ async def main() -> int:
     started = time.perf_counter()
     stt, tts = [], []
     try:
+        for cfg in config.tts:  # merge the speech settings ([voice_settings]) into each fixed voice's options
+            cfg.options = config.speech_options(cfg.name, cfg.options)
         for cfg in config.stt + config.tts:
             engine = create_engine(cfg, config.gpu)
             t = time.perf_counter()
@@ -89,7 +91,9 @@ async def main() -> int:
     if any(e.runtime.fell_back for e in stt + tts):
         _LOGGER.warning("!!! Running with CPU FALLBACK for at least one engine (see above); voice is slower.")
 
-    voices = VoiceRegistry(tts, config.tts_library, config.gpu, config.server.max_loaded_voices, create_engine)
+    voices = VoiceRegistry(
+        tts, config.tts_library, config.gpu, config.server.max_loaded_voices, create_engine, config.speech_options
+    )
     await voices.refresh()
     for i, lib in enumerate(config.tts_library):
         problem = voices.problem(i)

@@ -90,6 +90,7 @@ config when it runs without Compose.
 | Languages | `PARAKEET_LANGUAGES` (default `en`, `auto` = all 25 of Parakeet v3); Whisper offers all of its languages |
 | Whisper speed | `WHISPER_AUDIO_CTX=512` (~10 s window, ~3× faster; longer audio uses the full window automatically), `0` = always 30 s |
 | Voices | the default voice in `VOICES_DIR`; every `<name>.onnx` + `<name>.onnx.json` in `VOICES_DIR`, `VOICE_LIBRARY_DIR` (subfolders too) and `EXTRA_VOICES_DIR` is offered to Home Assistant and loaded on first use (`MAX_LOADED_VOICES` at once). New files appear within ~30 s, no restart |
+| Speaking speed and style | `PIPER_LENGTH_SCALE` (speed: > 1 slower), `PIPER_NOISE_SCALE` (expressiveness), `PIPER_NOISE_W` (rhythm) for every voice; empty = each voice's own value from its `.onnx.json`. Per voice: `[voice_settings."<voice>"]` in the inline config |
 | More endpoints | add `[[endpoint]]` blocks to the inline config (and their ports). An endpoint may also list several engines: a request then goes to the first one that supports its language |
 
 Voice folders on network shares are fine: they are optional (a missing or hung share only removes its voices), and a
@@ -133,6 +134,14 @@ the compose file to its driver file (e.g. `radeon_icd.json` for AMD) and `GPU_NA
 | `scripts/` | `fetch-models.sh` (pinned downloads with sha256), `lock-requirements.sh` |
 | `tests/` | `run.sh`, unit and integration tests, ABI check, test audio |
 | `third_party/` | whisper.cpp v1.9.4 headers (MIT) for the ctypes bindings |
+
+## Ideas
+
+- **Pronunciation list:** Piper never sees letters; espeak-ng turns the text into phonemes first, so a mispronounced
+  name cannot be fixed by training a voice. A small, case-insensitive whole-word replacement table (a file mounted
+  into the container, applied to the text before Piper) would fix such words for every voice, e.g. respelling a
+  brand name or "Bichon Frise" as "Beeshon Freezay", and could also normalise symbols an LLM emits ("21°C", "7:30",
+  "%", "&").
 
 ## Licence
 

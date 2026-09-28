@@ -112,7 +112,10 @@ class VoiceRegistry:
         gpu: GpuConfig,
         max_loaded: int,
         factory: Callable[[EngineConfig, GpuConfig], TtsEngine],
+        speech_options: Optional[Callable[[str, dict], dict]] = None,
     ) -> None:
+        # (voice name, the folder's options) -> the voice's options with its speech settings (Config.speech_options)
+        self.speech_options = speech_options or (lambda _name, options: dict(options))
         self.fixed = {e.name: e for e in fixed}
         self.libraries = libraries
         self.gpu = gpu
@@ -279,7 +282,7 @@ class VoiceRegistry:
             library = entry.library
             config = EngineConfig(
                 kind="tts", name=entry.name, backend=library.backend, model=entry.path, device=library.device,
-                languages=entry.languages, options=dict(library.options),
+                languages=entry.languages, options=self.speech_options(entry.name, library.options),
             )
             t = time.perf_counter()
             try:

@@ -89,6 +89,20 @@ configs:
       device = "${WYOMING_DEVICE:-auto}"
       languages = ["${DEFAULT_VOICE_LANGUAGE:-en_US}"]
 
+      # Piper speech settings for every voice; empty = the voice's own value (the "inference" section of its
+      # .onnx.json, typically length_scale 1.0, noise_scale 0.667, noise_w 0.8).
+      #   length_scale  speaking speed: > 1 slower, < 1 faster
+      #   noise_scale   variation / expressiveness of the audio
+      #   noise_w       variation of phoneme durations (rhythm)
+      [voice_settings."*"]
+      length_scale = "${PIPER_LENGTH_SCALE:-}"
+      noise_scale = "${PIPER_NOISE_SCALE:-}"
+      noise_w = "${PIPER_NOISE_W:-}"
+
+      # Per voice (by voice name; overrides the values above), e.g.:
+      # [voice_settings."en_US-ljspeech-high"]
+      # length_scale = 1.1
+
       # Voice folders, offered to Home Assistant and loaded on first use; a name found in an earlier folder wins.
       [[tts_library]]
       path = "/voices"

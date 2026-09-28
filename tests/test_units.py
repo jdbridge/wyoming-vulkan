@@ -670,5 +670,44 @@ class WhisperTextTests(unittest.TestCase):
         self.assertEqual(_collapse_repeats("no punctuation"), "no punctuation")
 
 
+class SpeechSettingsTests(unittest.TestCase):
+    def test_precedence_and_empty_values(self):
+        c = load_config(write(MINIMAL + '''
+[voice_settings."*"]
+length_scale = ""
+noise_w = 0.6
+[voice_settings."v1"]
+length_scale = "1.2"
+noise_w = ""
+'''))
+        # "*" < the entry's options < the voice's own table; empty values never erase a value
+        self.assertEqual(c.speech_options("v1", {"noise_scale": 0.5}), {"noise_w": 0.6, "noise_scale": 0.5, "length_scale": "1.2"})
+        self.assertEqual(c.speech_options("other", {}), {"noise_w": 0.6})
+        with self.assertRaises(ConfigError):
+            load_config(write(MINIMAL + '[voice_settings."v"]\nspeed = 2\n'))
+
+    def test_piper_values(self):
+        from wyoming_vulkan.engines.piper_ort import speech_settings
+        self.assertEqual(speech_settings({}), {"length_scale": None, "noise_scale": None, "noise_w_scale": None})
+        self.assertEqual(
+            speech_settings({"length_scale": "1.2", "noise_scale": "", "noise_w": 0.6}),
+            {"length_scale": 1.2, "noise_scale": None, "noise_w_scale": 0.6},
+        )
+        self.assertEqual(speech_settings({"noise_w_scale": 0.7})["noise_w_scale"], 0.7)
+
+    async def _registry_options(self):
+        c = load_config(write(MINIMAL + '[voice_settings."v1"]\nlength_scale = 1.3\n'))
+        factory = FakeFactory()
+        r = VoiceRegistry([], [LibraryConfig(path=make_library(["v1"]), options={"noise_scale": 0.4})], GpuConfig(), 2,
+                          factory, c.speech_options)
+        await r.refresh()
+        async with r.use("v1"):
+            pass
+        return factory.made[0].config.options
+
+    def test_folder_voice_gets_its_settings(self):
+        self.assertEqual(asyncio.run(self._registry_options()), {"noise_scale": 0.4, "length_scale": 1.3})
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1,7 +1,11 @@
 """Piper text-to-speech through ONNX Runtime: WebGPU EP (Dawn -> Vulkan) on the iGPU, or the CPU EP.
 
-Backend options in the config: config (voice .onnx.json, default <model>.json), length_scale, noise_scale,
-noise_w_scale (default: the voice's own values).
+Backend options in the config: config (voice .onnx.json, default <model>.json) and the speech settings
+  length_scale  speaking speed: > 1 slower, < 1 faster
+  noise_scale   variation / expressiveness of the audio
+  noise_w       variation of phoneme durations, i.e. rhythm (also accepted as noise_w_scale, piper-tts's name)
+A setting that is not configured (missing or empty) uses the voice's own value from the "inference" section of its
+.onnx.json. Per-voice values come from [voice_settings."<voice name>"] in the config (merged into these options).
 """
 
 import json
@@ -36,6 +40,23 @@ def _register_webgpu() -> str:
             ort.register_execution_provider_library("webgpu", webgpu.get_library_path())
             _WEBGPU_REGISTERED = True
     return webgpu.get_ep_name()
+
+
+def speech_settings(options: dict) -> dict[str, Optional[float]]:
+    """The configured speech settings (None = the voice's own value); empty strings count as not configured."""
+
+    def number(*keys: str) -> Optional[float]:
+        for key in keys:
+            value = options.get(key)
+            if value not in (None, ""):
+                return float(value)
+        return None
+
+    return {
+        "length_scale": number("length_scale"),
+        "noise_scale": number("noise_scale"),
+        "noise_w_scale": number("noise_w", "noise_w_scale"),
+    }
 
 
 class PiperEngine(TtsEngine):
@@ -82,18 +103,22 @@ class PiperEngine(TtsEngine):
         self.lock = threading.Lock()
         self.runtime.actual = device
         self.runtime.detail = f"WebGPU EP on {pci}, providers {got}" if device == "igpu" else f"providers {got}"
+        self.settings = speech_settings(self.config.options)
+        own = {"length_scale": piper_config.length_scale, "noise_scale": piper_config.noise_scale,
+               "noise_w_scale": piper_config.noise_w_scale}
+        effective = ", ".join(
+            f"{k.replace('_scale', '') if k == 'noise_w_scale' else k} {v if v is not None else own[k]:g}"
+            f" ({'config' if v is not None else 'voice'})" for k, v in self.settings.items()
+        )
         _LOGGER.info(
-            "tts %s: loaded %s (%d Hz) on %s, %s",
-            self.name, model.name, piper_config.sample_rate, self.runtime.summary(), self.runtime.detail,
+            "tts %s: loaded %s (%d Hz) on %s, %s; %s",
+            self.name, model.name, piper_config.sample_rate, self.runtime.summary(), self.runtime.detail, effective,
         )
 
     def synthesize(self, text: str, options: SynthesisOptions) -> bytes:
         voice = self.voice
         assert voice is not None, "engine not loaded"
-        o = self.config.options
-        syn = SynthesisConfig(
-            length_scale=o.get("length_scale"), noise_scale=o.get("noise_scale"), noise_w_scale=o.get("noise_w_scale")
-        )
+        syn = SynthesisConfig(**self.settings)  # None: piper uses the voice's own value
         if options.speaker is not None:
             syn.speaker_id = voice.config.speaker_id_map.get(options.speaker)
             if syn.speaker_id is None and options.speaker.isdigit():

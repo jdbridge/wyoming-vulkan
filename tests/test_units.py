@@ -72,7 +72,10 @@ class ConfigTests(unittest.TestCase):
             [("/data/models/piper", False, False), ("/data/voices", True, True), ("/voices-extra", True, False)],
         )
         self.assertEqual([(p.name, p.backend, str(p.model.parent)) for p in c.tts_pack],
-                         [("kokoro", "kokoro", "/data/models/kokoro"), ("kitten", "kitten", "/data/models/kitten")])
+                         [("kokoro", "kokoro", "/data/models/kokoro"), ("kitten", "kitten", "/data/models/kitten"),
+                          ("pocket", "pocket", "/data/models/pocket")])
+        pocket = c.tts_pack[2]
+        self.assertEqual((pocket.device, pocket.options.get("exclude")), ("cpu", ["cosette"]))
         self.assertEqual([(ep.stt, ep.tts) for ep in c.endpoints], [(["parakeet"], True), (["whisper"], False)])
         self.assertEqual({e.device for e in c.stt + c.tts + c.tts_library}, {"auto"})
         self.assertEqual(c.tts[0].model, Path(f"/data/models/piper/{c.tts[0].name}.onnx"))
@@ -772,6 +775,12 @@ class VoicePackTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(e.name, "en_US-fixed-high")
         self.assertNotIn("kokoro_af_x", [v.name for v in r.voices()])
 
+    async def test_include_exclude(self):
+        pack = FakePack(voices=("alba", "cosette", "marius"))
+        pack.config.options["exclude"] = ["cos*"]
+        r = await self.registry([pack])
+        self.assertEqual([n for n in r.names() if n.startswith("kokoro_")], ["kokoro_alba", "kokoro_marius"])
+
     async def test_unreadable_pack_is_left_out(self):
         class Unreadable(FakePack):
             def list_voices(self):
@@ -798,6 +807,60 @@ class FrontEndTests(unittest.TestCase):
         from wyoming_vulkan.engines.kokoro_ort import LANGUAGES
         self.assertNotIn("j", LANGUAGES)
         self.assertEqual(LANGUAGES["b"], ("en_GB", "en-gb"))
+
+
+class StreamingTests(unittest.IsolatedAsyncioTestCase):
+    """Engines with stream_audio(): frames reach the client while the sentence is still being produced."""
+
+    async def test_frames_arrive_before_synthesis_ends(self):
+        class StreamingPack(FakePack):
+            def stream_audio(self, text, options):
+                for _ in range(4):
+                    time.sleep(0.25)  # one frame every 250 ms
+                    yield b"\x02\x00" * 1920
+
+        pack = StreamingPack(name="pocket")
+        registry = VoiceRegistry([FakeTts("en_US-fixed-high")], [], GpuConfig(), 2, FakeFactory())
+        await registry.add_packs([pack])
+        port = free_port()
+        server = AsyncTcpServer("127.0.0.1", port)
+        await server.start(partial(WyomingHandler, Services(ServerConfig(), [], registry)))
+        try:
+            async with AsyncTcpClient("127.0.0.1", port) as c:
+                t = time.perf_counter()
+                await c.write_event(Synthesize(text="Hello there.", voice=SynthesizeVoice(name="pocket_af_x")).event())
+                arrivals, types = [], []
+                while True:
+                    e = await asyncio.wait_for(c.read_event(), 5)
+                    types.append(e.type)
+                    if e.type == "audio-chunk":
+                        arrivals.append(time.perf_counter() - t)
+                    if e.type == "audio-stop":
+                        break
+        finally:
+            await server.stop()
+        self.assertEqual((types[0], types[-1]), ("audio-start", "audio-stop"))
+        self.assertLess(arrivals[0], 0.6, "the first frame is sent before the whole sentence is done (~1 s)")
+        self.assertGreater(arrivals[-1] - arrivals[0], 0.5)
+
+    def test_onnx_metadata_reader(self):
+        from wyoming_vulkan.engines.pocket_ort import onnx_metadata
+
+        def field(num, payload):  # a length-delimited protobuf field
+            def varint(n):
+                out = b""
+                while True:
+                    out += bytes([(n & 0x7F) | (0x80 if n > 0x7F else 0)])
+                    n >>= 7
+                    if not n:
+                        return out
+            return varint(num << 3 | 2) + varint(len(payload)) + payload
+
+        entry = lambda k, v: field(14, field(1, k.encode()) + field(2, v.encode()))
+        blob = b"\x08\x07" + field(7, b"x" * 300) + entry("pocket_tts_voice/alba", "AAAA") + entry("pocket_tts_config", '{"sample_rate": 24000}')
+        path = Path(tempfile.mkdtemp()) / "m.onnx"
+        path.write_bytes(blob)
+        self.assertEqual(onnx_metadata(path), {"pocket_tts_voice/alba": "AAAA", "pocket_tts_config": '{"sample_rate": 24000}'})
 
 
 if __name__ == "__main__":

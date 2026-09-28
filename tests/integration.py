@@ -176,8 +176,13 @@ async def main() -> None:
         devices[item.name] = runs_on(item.description)
         print(f"       {item.name}: {item.description}")
         check(devices[item.name] in ("igpu", "cpu"), f"{item.name}: info states where it runs")
-    if args.expect != "any":
-        check(all(d == args.expect for d in devices.values()), f"all engines run on {args.expect}: {devices}")
+    if args.expect == "igpu":
+        # "[CPU]" = configured for the CPU (e.g. Pocket TTS) is fine; "[CPU fallback]" = the GPU is missing is not
+        fallback = [i.name for i in items if (i.description or "").endswith("[CPU fallback]")]
+        check(not fallback, f"no engine fell back to the CPU ({fallback or 'none'})")
+        check(any(d == "igpu" for d in devices.values()), "engines run on the GPU")
+    elif args.expect == "cpu":
+        check(all(d == "cpu" for d in devices.values()), f"all engines run on the CPU: {devices}")
 
     stt_name = info.asr[0].models[0].name if info.asr else None
     voice = info.tts[0].voices[0].name if info.tts else None
@@ -240,7 +245,7 @@ async def main() -> None:
 
         print(f"voice library ({len(info.tts[0].voices)} voices)")
         check(len(info.tts[0].voices) >= args.min_voices, f"at least {args.min_voices} voices offered")
-        others = [x.name for x in info.tts[0].voices if x.name != voice and not x.name.startswith(("kokoro_", "kitten_"))]
+        others = [x.name for x in info.tts[0].voices if x.name != voice and not x.name.startswith(("kokoro_", "kitten_", "pocket_"))]
         if others:
             lib_voice = next((n for n in others if "medium" in n), others[0])
             text = "The front door is locked and the lights are off."
@@ -254,7 +259,7 @@ async def main() -> None:
             desc = next(x.description for x in again.tts[0].voices if x.name == lib_voice)
             check(runs_on(desc) in ("igpu", "cpu"), f"loaded library voice states where it runs ({desc})")
 
-        for prefix in ("kokoro_", "kitten_"):
+        for prefix in ("kokoro_", "kitten_", "pocket_"):
             pack_voices = [x.name for x in info.tts[0].voices if x.name.startswith(prefix)]
             if not pack_voices:
                 continue
@@ -267,8 +272,11 @@ async def main() -> None:
             check(cold.types == ONE_BLOCK and cold.seconds > 1.0, f"{name} speaks")
             check(cold.total_s <= 30.0, f"{name}: first use incl. loading within 30 s ({cold.total_s:.2f})")
             desc = next(x.description for x in (await describe(uri)).tts[0].voices if x.name == name)
-            check(runs_on(desc) in ("igpu", "cpu") and (args.expect == "any" or runs_on(desc) == args.expect),
+            expect = "cpu" if prefix == "pocket_" else args.expect  # Pocket runs on the CPU by design
+            check(runs_on(desc) in ("igpu", "cpu") and (expect == "any" or runs_on(desc) == expect),
                   f"{name} states where it runs ({desc})")
+            if prefix == "pocket_":
+                check(warm.first_s <= 0.5, f"{name} streams: first audio after {warm.first_s:.3f} s")
 
         print("text-to-speech edge cases")
         r = await synthesize(uri, [Synthesize(text="  ", voice=v).event()], "audio-stop")

@@ -196,6 +196,39 @@ class WyomingHandler(AsyncEventHandler):
 
     # ---- text-to-speech ----
 
+    async def _speak_streaming(self, engine, stream, text, voice, rate, send_start: bool, send_stop: bool) -> None:
+        """Run the engine's frame generator in a worker thread and send every frame as it arrives."""
+        loop = asyncio.get_running_loop()
+        queue: asyncio.Queue = asyncio.Queue()
+        done = object()
+        options = SynthesisOptions(speaker=voice.speaker if voice else None)
+
+        def produce() -> None:
+            try:
+                for pcm in stream(text, options):
+                    loop.call_soon_threadsafe(queue.put_nowait, pcm)
+            finally:
+                loop.call_soon_threadsafe(queue.put_nowait, done)
+
+        t = time.perf_counter()
+        worker = loop.run_in_executor(None, produce)
+        if send_start:
+            await self.write_event(AudioStart(rate=rate, width=2, channels=1).event())
+        first, total = None, 0
+        step = self.services.server.samples_per_chunk * 2
+        while (pcm := await queue.get()) is not done:
+            if first is None:
+                first = time.perf_counter() - t
+            total += len(pcm)
+            for offset in range(0, len(pcm), step):
+                await self.write_event(AudioChunk(audio=pcm[offset : offset + step], rate=rate, width=2, channels=1).event())
+        await worker  # re-raises an engine error
+        took, seconds = time.perf_counter() - t, total / 2 / rate
+        _LOGGER.info("tts %s: %r -> %.2f s audio in %.3f s (RTF %.2f, first audio %.3f s, streamed)",
+                     engine.name, text, seconds, took, took / max(seconds, 1e-6), first or took)
+        if send_stop:
+            await self.write_event(AudioStop().event())
+
     async def _synthesize_oneshot(self, text: str, voice: Optional[SynthesizeVoice]) -> None:
         sbd = SentenceBoundaryDetector()
         sentences = list(sbd.add_chunk(text))
@@ -218,6 +251,10 @@ class WyomingHandler(AsyncEventHandler):
         async with self.services.tts.use(voice.name if voice else None) as engine:
             text = _prepare_text(sentence, engine.config.options.get("auto_punctuation", ".?!"))
             rate = engine.sample_rate
+            stream = getattr(engine, "stream_audio", None)
+            if text and stream is not None:  # the engine produces frames: send each one as soon as it exists
+                await self._speak_streaming(engine, stream, text, voice, rate, send_start, send_stop)
+                return
             pcm = b""
             if text:
                 t = time.perf_counter()

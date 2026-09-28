@@ -35,6 +35,8 @@ ENV VK_DRIVER_FILES=/usr/share/vulkan/icd.d/intel_icd.json \
     PYTHONPATH=/opt/wyoming-vulkan
 COPY config/config.example.toml /etc/wyoming-vulkan/config.toml
 COPY wyoming_vulkan /opt/wyoming-vulkan/wyoming_vulkan
+# Pocket TTS runtime (vendored, CC-BY-4.0; see third_party/pocket_tts_onnx/__init__.py)
+COPY third_party/pocket_tts_onnx /opt/wyoming-vulkan/pocket_tts_onnx
 EXPOSE 10310
 # Healthy = port open after load, GPU check and warm-up (~15 s) and a describe/info round trip works.
 HEALTHCHECK --interval=30s --timeout=15s --start-period=90s --retries=3 CMD ["python", "-m", "wyoming_vulkan.healthcheck"]

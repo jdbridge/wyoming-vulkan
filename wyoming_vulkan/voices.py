@@ -7,6 +7,7 @@ every scan and every load of a library voice runs in a worker thread with a time
 """
 
 import asyncio
+import fnmatch
 import json
 import logging
 import re
@@ -104,7 +105,7 @@ def _strip_language(name: str) -> str:
     return name[m.end():] if m else name
 
 
-ENGINE_TITLES = {"piper": "Piper", "kokoro": "Kokoro", "kitten": "Kitten"}  # HA shows "<Engine> <voice> [<device>]"
+ENGINE_TITLES = {"piper": "Piper", "kokoro": "Kokoro", "kitten": "Kitten", "pocket": "Pocket"}  # HA shows "<Engine> <voice> [<device>]"
 
 
 def _title(backend: str) -> str:
@@ -134,8 +135,17 @@ class _PackVoice:
     def sample_rate(self) -> int:
         return self.engine.sample_rate
 
+    def _options(self, options: SynthesisOptions) -> SynthesisOptions:
+        return SynthesisOptions(speaker=options.speaker, voice=self.voice, settings=self.settings)
+
     def synthesize(self, text: str, options: SynthesisOptions) -> bytes:
-        return self.engine.synthesize(text, SynthesisOptions(speaker=options.speaker, voice=self.voice, settings=self.settings))
+        return self.engine.synthesize(text, self._options(options))
+
+    @property
+    def stream_audio(self):
+        """The engine's frame streaming bound to this voice, or None if the engine only does whole sentences."""
+        stream = getattr(self.engine, "stream_audio", None)
+        return (lambda text, options: stream(text, self._options(options))) if stream else None
 
 
 class VoiceRegistry:
@@ -178,6 +188,11 @@ class VoiceRegistry:
             except Exception as err:  # missing files, NAS not answering
                 _LOGGER.warning("tts pack %s: cannot list voices (%s); its voices are not offered", engine.name, err or type(err).__name__)
                 continue
+            # pack options include / exclude: voice-id patterns (fnmatch), e.g. exclude = ["cosette"]
+            opts = engine.config.options
+            include, exclude = opts.get("include") or ["*"], opts.get("exclude") or []
+            voices = [(v, langs) for v, langs in voices
+                      if any(fnmatch.fnmatch(v, p) for p in include) and not any(fnmatch.fnmatch(v, p) for p in exclude)]
             if not voices:
                 _LOGGER.warning("tts pack %s: no voices found; nothing offered", engine.name)
                 continue

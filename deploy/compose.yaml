@@ -102,6 +102,13 @@ configs:
       model = "/data/models/kitten/kitten_tts_nano_v0_8.onnx"
       device = "${WYOMING_DEVICE:-auto}"
 
+      [[tts_pack]]
+      name = "pocket"                    # Pocket TTS (Kyutai): 6 English voices, streams 80 ms frames (first audio ~0.1 s)
+      backend = "pocket"
+      model = "/data/models/pocket/pocket-tts-english.onnx"
+      device = "${POCKET_DEVICE:-cpu}"   # autoregressive: faster on the CPU than on a small iGPU
+      exclude = ["cosette"]              # a very quiet voice that fails half of the round-trip tests
+
       # Piper speech settings for every voice; empty = the voice's own value (the "inference" section of its
       # .onnx.json, typically length_scale 1.0, noise_scale 0.667, noise_w 0.8). Kokoro and Kitten use length_scale.
       #   length_scale  speaking speed: > 1 slower, < 1 faster

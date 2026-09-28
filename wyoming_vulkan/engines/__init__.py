@@ -12,6 +12,7 @@ BACKENDS = {
     "piper": ("tts", "wyoming_vulkan.engines.piper_ort:PiperEngine"),
     "kokoro": ("tts_pack", "wyoming_vulkan.engines.kokoro_ort:KokoroEngine"),
     "kitten": ("tts_pack", "wyoming_vulkan.engines.kitten_ort:KittenEngine"),
+    "pocket": ("tts_pack", "wyoming_vulkan.engines.pocket_ort:PocketEngine"),
 }
 
 

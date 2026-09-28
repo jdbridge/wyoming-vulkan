@@ -2,7 +2,7 @@
 # Download models and voices at pinned Hugging Face revisions into <models>/<engine>/ and verify them (sha256 for the
 # large files; the small ones are pinned by the revision). Known-good defaults; the server takes any compatible file.
 # Usage: scripts/fetch-models.sh [-d models-dir] [item ...]     (default dir ./models, default items: the stack's set)
-#   scripts/fetch-models.sh -d deploy/data/models                    parakeet, whisper small, Piper LJ Speech, Kokoro, Kitten
+#   scripts/fetch-models.sh -d deploy/data/models                    parakeet, whisper small, Piper LJ Speech, Kokoro, Kitten, Pocket
 #   scripts/fetch-models.sh -d deploy/data/models whisper-base.en    one more model
 #   scripts/fetch-models.sh --list
 set -euo pipefail
@@ -12,6 +12,7 @@ WHISPER="ggerganov/whisper.cpp@5359861c739e955e79d9a303bcbc70fb988958b1"     # r
 PIPER="rhasspy/piper-voices@c10ece1aade47bb51c153c893d14e5bf8e5b7117"        # Piper voice catalogue
 KOKORO="onnx-community/Kokoro-82M-v1.0-ONNX@1939ad2a8e416c0acfeecc08a694d14ef25f2231"  # Apache-2.0
 KITTEN="KittenML/kitten-tts-nano-0.8-fp32@7a1db645b1f3ab9420761d87428e042b9cec3f26"  # Apache-2.0, 15M
+POCKET="thewh1teagle/pocket-tts-onnx@110f5251188e9407b4f724acdd8b0dfd0b20692a"      # Pocket TTS (Kyutai), CC-BY-4.0
 KITTEN_MINI="KittenML/kitten-tts-mini-0.8@c02725660cea441db4c383af69f1f26f5cd00947"  # 80M, ~10x slower here
 
 # item -> lines of "repo@revision path-in-repo sha256|- target-under-models size" (one line per file)
@@ -50,7 +51,8 @@ add kitten "$KITTEN config.json - kitten/config.json 1kB"
 add kitten-mini "$KITTEN_MINI kitten_tts_mini_v0_8.onnx 0f5bbae4fc4800c98dbc544a87ecfa79510de2fb8222db30d12e5bfe9177df91 kitten-mini/kitten_tts_mini_v0_8.onnx 78MB"
 add kitten-mini "$KITTEN_MINI voices.npz 40ad2638952b77b7b2f30127e2608e169fc69dd256b53bd8aaa3409a33193c42 kitten-mini/voices.npz 3MB"
 add kitten-mini "$KITTEN_MINI config.json - kitten-mini/config.json 1kB"
-DEFAULT=(parakeet-q8_0 whisper-small piper-en_US-ljspeech-high kokoro kitten)
+add pocket "$POCKET pocket-tts-english.onnx b157f4a949477df83f9d0a141d5bc68de7aa2a6c9dfd3dcdc49c0642e6a66e4c pocket/pocket-tts-english.onnx 228MB"
+DEFAULT=(parakeet-q8_0 whisper-small piper-en_US-ljspeech-high kokoro kitten pocket)
 
 KEYS=()
 while (($#)); do

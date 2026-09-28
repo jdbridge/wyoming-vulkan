@@ -23,6 +23,7 @@ from wyoming_vulkan.engines.kitten_ort import KittenEngine
 from wyoming_vulkan.engines.kokoro_ort import KokoroEngine
 from wyoming_vulkan.engines.parakeet_cpp import ParakeetEngine
 from wyoming_vulkan.engines.piper_ort import PiperEngine
+from wyoming_vulkan.engines.pocket_ort import PocketEngine
 
 SENTENCES = [
     "Turned on the kitchen lights.",
@@ -98,6 +99,9 @@ def main() -> int:
     p.add_argument("--kitten")
     p.add_argument("--kitten-voices", default="")
     p.add_argument("--piper")
+    p.add_argument("--pocket")
+    p.add_argument("--pocket-voices", default="")
+    p.add_argument("--pocket-device", default="cpu")
     p.add_argument("--device", default="igpu")
     p.add_argument("--sentences", type=int, default=len(SENTENCES))
     p.add_argument("--gpu-vs-cpu", type=int, default=0)
@@ -123,6 +127,12 @@ def main() -> int:
         names = args.kitten_voices.split(",") if args.kitten_voices else [v for v, _ in e.list_voices()]
         for v in names:
             voices.append((f"kitten {v}", e, SynthesisOptions(voice=v)))
+
+    if args.pocket:
+        e = engine(PocketEngine, "pocket", args.pocket, args.pocket_device)
+        names = args.pocket_voices.split(",") if args.pocket_voices else [v for v, _ in e.list_voices()]
+        for v in names:
+            voices.append((f"pocket {v}", e, SynthesisOptions(voice=v)))
 
     failed = False
     print(f"{'voice':28s} {'WER':>6s} {'exact':>7s} {'RTF':>5s} {'first':>6s}  worst")

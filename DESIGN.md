@@ -16,7 +16,9 @@ Home Assistant                       Wyoming over TCP (JSON header line + option
 │   │     └─ Whisper:  ctypes → libwhisper.so ──┴─ ggml (Vulkan backend) ─┐     │
 │   └─ TTS: synthesize | synthesize-start/chunk/stop                        │     │
 │         → audio-start/chunk/stop (+ synthesize-stopped)                   │     │
-│         └─ Piper / Kokoro / KittenTTS → ONNX Runtime → WebGPU EP → Dawn ┐ │     │
+│         ├─ Piper / Kokoro / KittenTTS → ONNX Runtime → WebGPU EP → Dawn ┐ │     │
+│         ├─ Pocket TTS → ONNX Runtime, CPU EP                             │ │     │
+│         └─ CosyVoice3 → HTTP → cosyvoice-server (child process, own ggml) ┤ │     │
 │                                                  Vulkan loader ◄┴─────────┘     │
 │                                                  Mesa driver (one ICD file only) │
 └─────────────────────────────────────────────────────────── /dev/dri/renderD128 ─┘
@@ -32,6 +34,8 @@ How the GPU reaches the container does not matter: bare metal, a whole GPU passe
 **Base:** the whisper.cpp **v1.9.4** release image with Vulkan, pinned by digest (`Dockerfile`; Ubuntu 24.04.4, Mesa 25.2.8). It contains Mesa's Vulkan drivers, `libvulkan`, `libparakeet.so` and `libwhisper.so` in `/app/build/bin` (added to `ldconfig`; newer whisper.cpp images use `/usr/local/lib`). Python 3.12 is in the base.
 
 **Added**, all pinned: `python3-venv` and `vulkan-tools` (exact versions from a dated Ubuntu snapshot), a venv from `requirements.txt` with hashes (`onnxruntime` 1.30.0, `onnxruntime-ep-webgpu` 0.4.0, `piper-tts` 1.8.0, `wyoming` 1.10.2, `sentence-stream` 1.3.0, `numpy` 2.5.3; regenerate with `scripts/lock-requirements.sh`). The ctypes bindings follow the headers of the same whisper.cpp commit (`third_party/`); `tests/check_abi.sh` compiles them with gcc and compares every struct size and field offset with the ctypes definitions.
+
+**CosyVoice3 build stage:** cosyvoice.cpp (pinned commit) is compiled in a separate stage of the same base image, with its own ggml (the v0.23.0 tag, Vulkan backend), the ONNX Runtime 1.30.0 C library (sha256-checked) for its voice-prompt frontend, gcc 14 (C++20), API-only server. It lands in `/opt/cosyvoice` with its libraries next to it (RUNPATH `$ORIGIN`); the build fails if `ldd` would resolve anything to whisper.cpp's ggml. Two ggml builds in one process crash (same library names, different versions), which is why it runs as a separate process.
 
 **Runtime settings:**
 
@@ -138,15 +142,27 @@ wyoming_vulkan/
 - **KittenTTS:** the nano model (15M); mini (80M) and micro (40M) were 5–10× slower on this iGPU and CPU. 24 kHz, English.
 - Speed (`length_scale`): packs take `speed = 1 / length_scale`.
 
-### 4.5 Engines tested and not added
+### 4.5 Pocket TTS (voice pack, CPU)
 
-- **Pocket TTS** (Kyutai, 100M, CC-BY-4.0; single-file ONNX runtime by thewh1teagle/pocket-tts-onnx): perfect round trip; on the CPU RTF 0.42 with the first 80 ms frame after 0.07 s (autoregressive, streams frame by frame), on the WebGPU EP RTF 1.84 (too many tiny steps). A CPU-only pack with frame-level streaming would be the way to add it.
-- **CosyVoice3-0.5B:** its language model on llama.cpp's Vulkan backend generates 30 (Q8_0) to 34 (Q4_K_M) tokens/s on this iGPU; CosyVoice needs 25 per second of speech, so the language model alone uses 75–85 % of real time before the flow-matching model (1.3 GB ONNX) and the PyTorch vocoder: not real time here.
+- Kyutai's 100M model (CC-BY-4.0) through the single-file ONNX runtime of thewh1teagle/pocket-tts-onnx (vendored in `third_party/pocket_tts_onnx`): one `.onnx` holds the graph, the SentencePiece tokenizer and the voices. Perfect round trip.
+- Autoregressive: it decodes 80 ms frames one after another, and the engine's `stream_audio()` hands each frame to Home Assistant as soon as it exists (first audio after ~0.07 s instead of after the sentence). CPU RTF 0.42; on the WebGPU EP RTF 1.84 (too many tiny steps), so the stack runs it with `device = "cpu"`.
+- Frames cannot be peak-normalised per sentence while streaming, so a fixed `gain` (1.5) brings it to the level of the other engines. The voice `cosette` is excluded in the stack (so quiet it fails half of the round trips).
+
+### 4.6 CosyVoice3 (voice pack, optional, child process)
+
+- Fun-CosyVoice3-0.5B-2512 (Apache-2.0): text → Qwen2.5-0.5B language model (speech tokens, 25 per second) → flow-matching DiT (10 Euler steps with classifier-free guidance) → HiFT vocoder, 24 kHz, 9 languages. [cosyvoice.cpp](https://github.com/Lourdle/cosyvoice.cpp) (MIT) runs all of it on ggml, including Vulkan; its models are GGUF (`Lourdle/Fun-CosyVoice3-0.5B-2512-GGUF`, Q8_0).
+- **Child process:** the engine starts `cosyvoice-server --api` on a free loopback port with every voice, waits for `/healthz`, and requests raw PCM from `/v1/audio/speech` (whole sentences; the server's chunked streaming was slower in total without its DiT cache, and that cache crashed it). One request at a time. Closing the engine stops the process.
+- **GPU proof:** the server gets an explicit ggml device (`--backend Vulkan0`, option `gpu_device`) and exits if it does not exist ("failed to initialize backend"), so it cannot fall back silently; that exit becomes `GpuUnavailable` (`igpu`: the pack fails; `auto`: CPU fallback, loud). The device name shown in `info` is the description of the same ggml device in the server process's own ggml list.
+- **Voices** are voice prompts, not built in: `voices/<name>.wav` + `<name>.txt` (the clip's exact transcript) is encoded once at load by `cosyvoice-cli --frontend-only` (speech tokenizer + CAM++ speaker model, ONNX on the CPU, ~4 s) into a cache keyed by the files' contents; `<name>.gguf` is used as is. Every voice speaks every language (cross-lingual). The fetch script provides the upstream example clip (Apache-2.0, a Chinese speaker) as `zh_female`.
+- **Measured on the N305 iGPU:** ~20 s for a 2 s sentence (RTF 9–12); the profile shows ~2.2 s per flow step (matrix products at ~175 GFLOPS, near what ggml gets from this GPU), so it is the GPU's compute, not a build problem. The language model alone runs at ~33 tokens/s. On the CPU RTF ~70. Q4_K_M is no faster than Q8_0. Output is intelligible (0 % word error on a two-sentence test with an English prompt). Off by default (`COSYVOICE_ENABLED`); published numbers (RTF 0.2–0.4 on a Strix Halo iGPU) suggest it becomes usable on a large iGPU or a discrete GPU.
+
+### 4.7 Engines tested and not added
+
 - **Fish Speech 1.5, XTTS v2:** not attempted (non-commercial weights, far too large for this class of GPU).
 
-### 4.6 CPU fallback
+### 4.8 CPU fallback
 
-Parakeet and Whisper with `use_gpu = false`; Piper, Kokoro and KittenTTS with the CPU EP. Everything keeps working, slower (see `README.md`).
+Parakeet and Whisper with `use_gpu = false`; Piper, Kokoro and KittenTTS with the CPU EP; CosyVoice3 with ggml's CPU backend. Everything keeps working, slower (see `README.md`).
 
 ## 5. Start-up
 
@@ -162,3 +178,24 @@ Parakeet and Whisper with `use_gpu = false`; Piper, Kokoro and KittenTTS with th
 - **One data folder** `DATA_DIR` → `/data` (read-only, `rslave`, `create_host_path`): `models/<engine>/` (`scripts/fetch-models.sh -d <DATA_DIR>/models`) and `voices/` (own Piper voices). It may be a network share: if it is not mounted yet when the container starts, the models are missing, the server exits, Docker restarts it, and the share appears inside the container once the host mounts it (`rslave`). An optional extra voice folder (`EXTRA_VOICES_DIR` → `/voices-extra`).
 - Log rotation 3 × 10 MB.
 - **Diagnostics page** (`web.py`, port 10312): runs in the same event loop and reads the live engines and the voice registry. The benchmark creates separate engine instances with `create_engine` (so "cold" includes loading, and the serving engines are not disturbed apart from sharing the GPU), one model at a time, and closes each afterwards. Memory per model is the growth of the container's memory (cgroup) during load and warm-up: on an iGPU the model's buffers are system RAM and are charged there, whereas the process RSS misses them.
+
+## 7. Choosing among several GPUs (design, not built yet)
+
+Goal: pick the GPU per engine, e.g. Whisper and CosyVoice3 on a discrete NVIDIA card, Parakeet and Piper on the iGPU. Today the image exposes only Mesa's Intel driver, and every engine takes the first (only) Vulkan GPU.
+
+**Getting an NVIDIA GPU into the container through Vulkan** (NVIDIA Container Toolkit ≥ 1.12, headless Vulkan):
+- `NVIDIA_DRIVER_CAPABILITIES` must include `graphics` (e.g. `compute,utility,graphics`); it replaces the default `compute,utility`. The toolkit then mounts the host's `nvidia_icd.json` (at `/etc/vulkan/icd.d/`) and driver libraries; without the file on the host there is no NVIDIA Vulkan device.
+- The NVIDIA ICD (`libGLX_nvidia.so.0`) needs `libXext.so.6` (fails loudly when missing) and `libEGL.so.1` (fails silently when missing): the image would add `libxext6` and `libegl1`.
+- `VK_DRIVER_FILES` becomes a colon-separated list: `/usr/share/vulkan/icd.d/intel_icd.json:/etc/vulkan/icd.d/nvidia_icd.json`. It stays explicit, so `llvmpipe` stays hidden.
+
+**How each engine chooses:**
+
+| Engine | Mechanism | Notes |
+|---|---|---|
+| Parakeet, Whisper (ggml in-process) | `GGML_VK_VISIBLE_DEVICES` (Vulkan device indices), plus whisper.cpp's `gpu_device` | ggml by default uses all *discrete* GPUs and skips the iGPU once one exists; the variable is read once per process, so both in-process engines see the same set and `gpu_device` picks between them |
+| Piper, Kokoro, Kitten, Pocket (ONNX Runtime WebGPU EP) | `powerPreference` provider option (`low-power` → iGPU, `high-performance` → discrete) | the plugin (0.4.0) chooses the physical GPU itself; the EP device from `get_ep_devices()` does not decide it. An `adapterIndex` option was merged upstream on 2026-09-25 and is not in 0.4.0 |
+| CosyVoice3 (child process) | `gpu_device = "Vulkan1"` → `--backend Vulkan1`; the child can also get its own `GGML_VK_VISIBLE_DEVICES` | the easiest: its environment is separate |
+
+**Config:** per engine `gpu = "auto" | "intel" | "nvidia" | "amd" | "<vendor id>:<device id>"` (default: the `[gpu]` section as today). At start-up the server lists the Vulkan devices once (vendor id, device id, name, type), resolves each engine's `gpu` to a device, then sets `GGML_VK_VISIBLE_DEVICES` before libparakeet/libwhisper are loaded and passes `powerPreference` / `gpu_device` to the others. After loading, each engine's proof checks the device it actually got against the one it asked for (name and vendor), loudly as today. Indices are never configured by hand: they change when a driver is added.
+
+**Limits to design around:** Vulkan loader variables are per process (ggml and Dawn in the main process share them); the WebGPU plugin can only express "low-power vs high-performance", which is enough for one iGPU + one discrete GPU but not for two discrete GPUs until `adapterIndex` ships; concurrent `Run()` on two WebGPU sessions has been reported to crash on Linux/Vulkan, on one GPU or two (onnxruntime #32561; not seen here so far), so one lock across all ORT GPU sessions is the fallback if it shows up. Not tested yet on an NVIDIA GPU.

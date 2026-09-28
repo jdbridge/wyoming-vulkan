@@ -111,6 +111,15 @@ configs:
       device = "${POCKET_DEVICE:-cpu}"   # autoregressive: faster on the CPU than on a small iGPU
       exclude = ["cosette"]              # a very quiet voice that fails half of the round-trip tests
 
+      [[tts_pack]]
+      name = "cosyvoice"                 # CosyVoice3 0.5B (cosyvoice.cpp): voice cloning, 9 languages, needs a strong GPU
+      backend = "cosyvoice"
+      model = "/data/models/cosyvoice/CosyVoice3-2512_Q8_0.gguf"
+      enabled = ${COSYVOICE_ENABLED:-false}  # ~10x slower than real time on an Intel N305 iGPU
+      device = "${COSYVOICE_DEVICE:-igpu}"
+      languages = "auto"                 # every voice speaks all of CosyVoice3's languages
+      # voices: /data/models/cosyvoice/voices/<name>.wav + <name>.txt (the clip's exact transcript), or <name>.gguf
+
       # Piper speech settings for every voice; empty = the voice's own value (the "inference" section of its
       # .onnx.json, typically length_scale 1.0, noise_scale 0.667, noise_w 0.8). Kokoro and Kitten use length_scale.
       #   length_scale  speaking speed: > 1 slower, < 1 faster

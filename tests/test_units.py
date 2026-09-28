@@ -73,9 +73,12 @@ class ConfigTests(unittest.TestCase):
         )
         self.assertEqual([(p.name, p.backend, str(p.model.parent)) for p in c.tts_pack],
                          [("kokoro", "kokoro", "/data/models/kokoro"), ("kitten", "kitten", "/data/models/kitten"),
-                          ("pocket", "pocket", "/data/models/pocket")])
+                          ("pocket", "pocket", "/data/models/pocket"), ("cosyvoice", "cosyvoice", "/data/models/cosyvoice")])
         pocket = c.tts_pack[2]
         self.assertEqual((pocket.device, pocket.options.get("exclude")), ("cpu", ["cosette"]))
+        cosy = c.tts_pack[3]
+        self.assertEqual((cosy.device, cosy.languages), ("igpu", None), "CosyVoice3 fails loudly without a GPU, all languages")
+        self.assertIsInstance(cosy.options.get("enabled"), bool, "COSYVOICE_ENABLED renders as a TOML boolean")
         self.assertEqual([(ep.stt, ep.tts) for ep in c.endpoints], [(["parakeet"], True), (["whisper"], False)])
         self.assertEqual({e.device for e in c.stt + c.tts + c.tts_library}, {"auto"})
         self.assertEqual(c.tts[0].model, Path(f"/data/models/piper/{c.tts[0].name}.onnx"))
@@ -789,6 +792,30 @@ class VoicePackTests(unittest.IsolatedAsyncioTestCase):
         with self.assertLogs("wyoming_vulkan.voices", "WARNING"):
             r = await self.registry([Unreadable()])
         self.assertEqual(r.names(), ["en_US-fixed-high"])
+
+    async def test_disabled_pack_is_left_out(self):
+        pack = FakePack()
+        pack.config.options["enabled"] = False
+        r = await self.registry([pack])
+        self.assertEqual(r.names(), ["en_US-fixed-high"])
+        self.assertEqual(pack.loads, 0)
+
+    def test_cosyvoice_voice_folder(self):
+        from wyoming_vulkan.engines.cosyvoice_cpp import LANGUAGES, CosyVoiceEngine
+
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "voices").mkdir()
+            (Path(d) / "model.gguf").write_bytes(b"x")
+            for f in ("anna.wav", "anna.txt", "bert.gguf", "carl.wav", "bert.wav", "bert.txt"):
+                (Path(d) / "voices" / f).write_bytes(b"x")
+            e = CosyVoiceEngine(EngineConfig(kind="tts", name="cosyvoice", backend="cosyvoice", model=Path(d) / "model.gguf",
+                                             device="igpu", languages=None), GpuConfig())
+            # a .wav needs its transcript (carl has none); an encoded .gguf wins over a clip of the same name
+            self.assertEqual(e.list_voices(), [("anna", LANGUAGES), ("bert", LANGUAGES)])
+            self.assertEqual(e._voice_files()["bert"].suffix, ".gguf")
+            (Path(d) / "model.gguf").unlink()
+            with self.assertRaises(FileNotFoundError):
+                e.list_voices()
 
     def test_pack_speed_from_length_scale(self):
         pack = FakePack()

@@ -245,7 +245,7 @@ async def main() -> None:
 
         print(f"voice library ({len(info.tts[0].voices)} voices)")
         check(len(info.tts[0].voices) >= args.min_voices, f"at least {args.min_voices} voices offered")
-        others = [x.name for x in info.tts[0].voices if x.name != voice and not x.name.startswith(("kokoro_", "kitten_", "pocket_"))]
+        others = [x.name for x in info.tts[0].voices if x.name != voice and not x.name.startswith(("kokoro_", "kitten_", "pocket_", "cosyvoice_"))]
         if others:
             lib_voice = next((n for n in others if "medium" in n), others[0])
             text = "The front door is locked and the lights are off."
@@ -277,6 +277,18 @@ async def main() -> None:
                   f"{name} states where it runs ({desc})")
             if prefix == "pocket_":
                 check(warm.first_s <= 0.5, f"{name} streams: first audio after {warm.first_s:.3f} s")
+
+        # CosyVoice3 (only when enabled in the stack): far slower than real time on a small iGPU, so only "it speaks,
+        # on the GPU, and it understands the text" is checked, with one short sentence
+        cosy = [x.name for x in info.tts[0].voices if x.name.startswith("cosyvoice_")]
+        if cosy:
+            text = "Turned on the kitchen lights."
+            r = await synthesize(uri, [Synthesize(text=text, voice=SynthesizeVoice(name=cosy[0])).event()], "audio-stop")
+            print(f"voice pack cosyvoice ({len(cosy)} voices), {cosy[0]}: {r.total_s:.1f} s incl. loading for {r.seconds:.2f} s audio at {r.rate} Hz")
+            check(r.types == ONE_BLOCK and r.seconds > 1.0, f"{cosy[0]} speaks")
+            desc = next(x.description for x in (await describe(uri)).tts[0].voices if x.name == cosy[0])
+            check(runs_on(desc) in ("igpu", "cpu") and (args.expect == "any" or runs_on(desc) == args.expect),
+                  f"{cosy[0]} states where it runs ({desc})")
 
         print("text-to-speech edge cases")
         r = await synthesize(uri, [Synthesize(text="  ", voice=v).event()], "audio-stop")

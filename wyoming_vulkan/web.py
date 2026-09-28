@@ -439,8 +439,8 @@ _BENCH = """
 <p><button id="csv">Download CSV</button></p><div class="wrap"><table id="res"></table></div>
 <script>
 const esc=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
-const ENG=[['piper','Piper (fixed voices)'],['folders','Piper folder voices'],['kokoro','Kokoro'],['kitten','Kitten'],['pocket','Pocket'],['stt','Speech-to-text']];
-document.getElementById('engines').innerHTML=ENG.map(([k,l])=>`<label><input type="checkbox" value="${k}" ${k!=='folders'?'checked':''}> ${l}</label>`).join(' &nbsp; ');
+const ENG=[['piper','Piper (fixed voices)'],['folders','Piper folder voices'],['kokoro','Kokoro'],['kitten','Kitten'],['pocket','Pocket'],['cosyvoice','CosyVoice3 (slow on an iGPU)'],['stt','Speech-to-text']];
+document.getElementById('engines').innerHTML=ENG.map(([k,l])=>`<label><input type="checkbox" value="${k}" ${k!=='folders'&&k!=='cosyvoice'?'checked':''}> ${l}</label>`).join(' &nbsp; ');
 const COLS=[['kind','Kind'],['engine','Engine'],['voice','Voice / model'],['device','Runs on'],['cold_first_s','Cold first (s)'],['warm_first_s','Warm first (s)'],['total_s','Total (s)'],['audio_s','Audio (s)'],['rtf','RTF'],['wer','WER'],['memory_mb','Memory (MiB)'],['heard','Heard'],['error','Error']];
 let rows=[],sortKey=null,sortDir=1;
 function render(){const r=[...rows];if(sortKey)r.sort((a,b)=>((a[sortKey]??1e9)>(b[sortKey]??1e9)?1:-1)*sortDir);

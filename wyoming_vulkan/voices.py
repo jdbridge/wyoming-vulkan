@@ -106,7 +106,7 @@ def _strip_language(name: str) -> str:
     return name[m.end():] if m else name
 
 
-ENGINE_TITLES = {"piper": "Piper", "kokoro": "Kokoro", "kitten": "Kitten", "pocket": "Pocket"}  # HA shows "<Engine> <voice> [<device>]"
+ENGINE_TITLES = {"piper": "Piper", "kokoro": "Kokoro", "kitten": "Kitten", "pocket": "Pocket", "cosyvoice": "CosyVoice"}  # HA shows "<Engine> <voice> [<device>]"
 
 
 def _title(backend: str) -> str:
@@ -184,6 +184,9 @@ class VoiceRegistry:
         """List each pack's voices (small files only, in a thread with a timeout: they may be on a network share).
         A pack whose files cannot be read is left out with a warning; it never stops the server."""
         for engine in engines:
+            if str(engine.config.options.get("enabled", True)).lower() in ("false", "0", "no", "off"):
+                _LOGGER.info("tts pack %s: disabled (enabled = false)", engine.name)
+                continue
             try:
                 voices = await asyncio.wait_for(asyncio.to_thread(engine.list_voices), SCAN_TIMEOUT_S * 2)
             except Exception as err:  # missing files, NAS not answering

@@ -7,9 +7,12 @@ container, on the GPU you already have: the integrated graphics of a mini PC or 
   [whisper.cpp](https://github.com/ggml-org/whisper.cpp) (ggml, Vulkan backend).
 - **Text-to-speech:** [**Piper**](https://github.com/OHF-Voice/piper1-gpl), [**Kokoro-82M**](https://huggingface.co/hexgrad/Kokoro-82M)
   (42 voices, 7 languages) and [**KittenTTS**](https://github.com/KittenML/KittenTTS) nano (8 voices), all through
-  ONNX Runtime's WebGPU execution provider (Dawn on Vulkan), with sentence streaming. Every voice of every engine
-  appears in one list in Home Assistant, e.g. `Kokoro af_heart [Intel(R) Graphics (ADL-N)]`, loaded on first use;
-  whole folders of Piper voices are picked up automatically.
+  ONNX Runtime's WebGPU execution provider (Dawn on Vulkan), with sentence streaming; [**Pocket TTS**](https://github.com/kyutai-labs/pocket-tts)
+  (5 voices) on the CPU, streaming 80 ms frames; optionally [**CosyVoice3**](https://huggingface.co/FunAudioLLM/Fun-CosyVoice3-0.5B-2512)
+  (voice cloning from a short clip, 9 languages) through [cosyvoice.cpp](https://github.com/Lourdle/cosyvoice.cpp)
+  on Vulkan, for GPUs stronger than a small iGPU. Every voice of every engine appears in one list in Home Assistant,
+  e.g. `Kokoro af_heart [Intel(R) Graphics (ADL-N)]`, loaded on first use; whole folders of Piper voices are picked
+  up automatically.
 - **One stack, several choices in Home Assistant:** every port is its own speech-to-text entity (Parakeet on one,
   Whisper on the other; the voices are offered with Parakeet), and all of them share one process and one GPU.
 - **Only Vulkan / Mesa:** no CUDA, no Intel compute runtime, no OpenVINO. If the GPU is missing, the server either
@@ -46,8 +49,10 @@ Text-to-speech, 30 sentences per voice, transcribed back by Parakeet (`tests/tts
 | Piper, medium voice | – | ~0.12 | – | |
 | Piper, high voice | 0.8 % | 0.39–0.47 | ~0.7 | first audio 0.6–0.7 s |
 | Kokoro-82M fp32 (4 voices tested) | 0–0.7 % | 0.76–0.79 | ~1.0 | ~2.5 s for a 3 s sentence; fp16 exports produce NaNs on WebGPU |
+| Pocket TTS (5 voices) | 0 % | 1.84 | **0.42** | runs on the CPU; streams 80 ms frames, first audio after ~0.07 s |
+| CosyVoice3 0.5B Q8_0 (off by default) | – | 9–12 | ~70 | ~20 s for a 2 s sentence: the flow model's 10 steps take ~2.2 s each here; needs a stronger GPU |
 
-A folder voice or a voice pack loads on first use (Piper voice ~2.5 s, Kokoro ~3–7 s, Kitten ~2.6 s).
+A folder voice or a voice pack loads on first use (Piper voice ~2.5 s, Kokoro ~3–7 s, Kitten ~2.6 s, Pocket ~3.6 s).
 
 Start-up (loading and warming up Parakeet, Whisper small and one voice): ~17 s. Speech-to-text and text-to-speech at
 the same moment share the GPU (each ~1.5–2× slower). Without the GPU (CPU fallback on the same machine): Parakeet
@@ -98,8 +103,9 @@ config when it runs without Compose.
 | Other models | `PARAKEET_MODEL`, `WHISPER_MODEL` in `DATA_DIR/models/parakeet` and `…/whisper` (`scripts/fetch-models.sh --list`) |
 | Languages | `PARAKEET_LANGUAGES` (default `en`, `auto` = all 25 of Parakeet v3); Whisper offers all of its languages |
 | Whisper speed | `WHISPER_AUDIO_CTX=512` (~10 s window, ~3× faster; longer audio uses the full window automatically), `0` = always 30 s |
-| Voices | the default Piper voice `DEFAULT_VOICE` in `DATA_DIR/models/piper`; every `<name>.onnx` + `<name>.onnx.json` there, in `DATA_DIR/voices` (subfolders too) and in `EXTRA_VOICES_DIR` is offered to Home Assistant, plus the Kokoro and Kitten voices (`[[tts_pack]]` in the inline config). All load on first use; new files appear within ~30 s, no restart |
+| Voices | the default Piper voice `DEFAULT_VOICE` in `DATA_DIR/models/piper`; every `<name>.onnx` + `<name>.onnx.json` there, in `DATA_DIR/voices` (subfolders too) and in `EXTRA_VOICES_DIR` is offered to Home Assistant, plus the Kokoro, Kitten and Pocket voices (`[[tts_pack]]` in the inline config). All load on first use; new files appear within ~30 s, no restart |
 | Speaking speed and style | `PIPER_LENGTH_SCALE` (speed: > 1 slower), `PIPER_NOISE_SCALE` (expressiveness), `PIPER_NOISE_W` (rhythm) for every voice; empty = each voice's own value from its `.onnx.json`. Per voice: `[voice_settings."<voice>"]` in the inline config |
+| CosyVoice3 | `scripts/fetch-models.sh -d <models> cosyvoice`, then `COSYVOICE_ENABLED=true`. Voices: a clip of 5–15 s as `models/cosyvoice/voices/<name>.wav` plus its exact transcript as `<name>.txt` (encoded once at load), or an encoded `<name>.gguf`; every voice speaks all 9 languages. Only for voices you have the right to clone |
 | More endpoints | add `[[endpoint]]` blocks to the inline config (and their ports). An endpoint may also list several engines: a request then goes to the first one that supports its language |
 
 Voice folders on network shares are fine: they are optional (a missing or hung share only removes its voices), and a
@@ -157,7 +163,7 @@ the compose file to its driver file (e.g. `radeon_icd.json` for AMD) and `GPU_NA
 | `config/config.example.toml` | every config option, commented |
 | `scripts/` | `fetch-models.sh` (pinned downloads with sha256), `lock-requirements.sh` |
 | `tests/` | `run.sh`, unit and integration tests, ABI check, test audio |
-| `third_party/` | whisper.cpp v1.9.4 headers (MIT) for the ctypes bindings |
+| `third_party/` | whisper.cpp v1.9.4 headers (MIT) for the ctypes bindings; the Pocket TTS ONNX runtime (CC-BY-4.0) |
 
 ## Ideas
 
@@ -171,5 +177,6 @@ the compose file to its driver file (e.g. `radeon_icd.json` for AMD) and `GPU_NA
 
 GPL-3.0 (see `LICENSE`), matching piper-tts, which the image includes. Components: whisper.cpp and ggml (MIT), ONNX
 Runtime (MIT), the wyoming library (MIT), piper-tts (GPL-3.0), kokoro-onnx (MIT), phonemizer and espeak-ng (GPL-3.0),
-Parakeet models (CC-BY-4.0, NVIDIA), Whisper models (MIT, OpenAI), Kokoro-82M and KittenTTS models (Apache-2.0). Every
-Piper voice has its own licence; the image contains no models or voices.
+cosyvoice.cpp (MIT, built into the image with its own ggml), pocket-tts-onnx runtime (CC-BY-4.0), Parakeet models
+(CC-BY-4.0, NVIDIA), Whisper models (MIT, OpenAI), Kokoro-82M, KittenTTS and CosyVoice3 models (Apache-2.0), Pocket
+TTS model (CC-BY-4.0, Kyutai). Every Piper voice has its own licence; the image contains no models or voices.

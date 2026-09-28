@@ -14,6 +14,8 @@ KOKORO="onnx-community/Kokoro-82M-v1.0-ONNX@1939ad2a8e416c0acfeecc08a694d14ef25f
 KITTEN="KittenML/kitten-tts-nano-0.8-fp32@7a1db645b1f3ab9420761d87428e042b9cec3f26"  # Apache-2.0, 15M
 POCKET="thewh1teagle/pocket-tts-onnx@110f5251188e9407b4f724acdd8b0dfd0b20692a"      # Pocket TTS (Kyutai), CC-BY-4.0
 KITTEN_MINI="KittenML/kitten-tts-mini-0.8@c02725660cea441db4c383af69f1f26f5cd00947"  # 80M, ~10x slower here
+COSYVOICE="Lourdle/Fun-CosyVoice3-0.5B-2512-GGUF@ab01740bbbfcc059fd748163787554f7c8977e64"  # Apache-2.0 (model)
+COSYVOICE_ASSETS="github:FunAudioLLM/CosyVoice@074ca6dc9e80a2f424f1f74b48bdd7d3fea531cc"     # Apache-2.0 (example clip)
 
 # item -> lines of "repo@revision path-in-repo sha256|- target-under-models size" (one line per file)
 declare -A ITEMS
@@ -52,6 +54,12 @@ add kitten-mini "$KITTEN_MINI kitten_tts_mini_v0_8.onnx 0f5bbae4fc4800c98dbc544a
 add kitten-mini "$KITTEN_MINI voices.npz 40ad2638952b77b7b2f30127e2608e169fc69dd256b53bd8aaa3409a33193c42 kitten-mini/voices.npz 3MB"
 add kitten-mini "$KITTEN_MINI config.json - kitten-mini/config.json 1kB"
 add pocket "$POCKET pocket-tts-english.onnx b157f4a949477df83f9d0a141d5bc68de7aa2a6c9dfd3dcdc49c0642e6a66e4c pocket/pocket-tts-english.onnx 228MB"
+# CosyVoice3 (optional, slow on small iGPUs): model, voice-prompt frontend, and the upstream example clip as a voice
+add cosyvoice "$COSYVOICE CosyVoice3-2512_Q8_0.gguf be133cb6154ca73cd1d213b1c9496def99ba9c1f7c14cd99f6b350af2eb7963d cosyvoice/CosyVoice3-2512_Q8_0.gguf 944MB"
+add cosyvoice "$COSYVOICE frontend-onnx/speech_tokenizer_v3.int8.onnx d7caa04fbc2f54af196906469471b607ce2594b7e92ac07dddfb315103a74c72 cosyvoice/frontend/speech_tokenizer_v3.int8.onnx 244MB"
+add cosyvoice "$COSYVOICE frontend-onnx/campplus.onnx a6ac6a63997761ae2997373e2ee1c47040854b4b759ea41ec48e4e42df0f4d73 cosyvoice/frontend/campplus.onnx 28MB"
+add cosyvoice "$COSYVOICE_ASSETS asset/zero_shot_prompt.wav c7b31d6dbe7cc6a716dded00550db5b50940bf209e424e4ad207b12e657c8ff6 cosyvoice/voices/zh_female.wav 0.3MB"
+declare -A TRANSCRIPTS=([cosyvoice/voices/zh_female.txt]="希望你以后能够做的比我还好呦。")  # the clip's transcript
 DEFAULT=(parakeet-q8_0 whisper-small piper-en_US-ljspeech-high kokoro kitten pocket)
 
 KEYS=()
@@ -77,9 +85,14 @@ for key in "${KEYS[@]}"; do
     if [[ -f $out ]] && { [[ $sha == - ]] || echo "$sha  $out" | sha256sum -c --quiet - 2>/dev/null; }; then
       count=$((count + 1)); continue
     fi
-    curl -fsSL -o "$out.part" "https://huggingface.co/$repo/resolve/$rev/$path"
+    if [[ $repo == github:* ]]; then url="https://raw.githubusercontent.com/${repo#github:}/$rev/$path"
+    else url="https://huggingface.co/$repo/resolve/$rev/$path"; fi
+    curl -fsSL -o "$out.part" "$url"
     [[ $sha == - ]] || echo "$sha  $out.part" | sha256sum -c --quiet -
     mv "$out.part" "$out"; count=$((count + 1))
   done <<<"${ITEMS[$key]}"
+  for t in "${!TRANSCRIPTS[@]}"; do
+    [[ $t == "${key}/"* ]] && printf '%s\n' "${TRANSCRIPTS[$t]}" > "$DIR/$t"
+  done
   echo "$key: $count file(s) ok in $DIR"
 done

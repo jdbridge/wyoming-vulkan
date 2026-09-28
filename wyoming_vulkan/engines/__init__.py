@@ -13,6 +13,7 @@ BACKENDS = {
     "kokoro": ("tts_pack", "wyoming_vulkan.engines.kokoro_ort:KokoroEngine"),
     "kitten": ("tts_pack", "wyoming_vulkan.engines.kitten_ort:KittenEngine"),
     "pocket": ("tts_pack", "wyoming_vulkan.engines.pocket_ort:PocketEngine"),
+    "cosyvoice": ("tts_pack", "wyoming_vulkan.engines.cosyvoice_cpp:CosyVoiceEngine"),
 }
 
 

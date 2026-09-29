@@ -42,7 +42,7 @@ How the GPU reaches the container does not matter: bare metal, a whole GPU passe
 | Setting | Why |
 |---|---|
 | the GPU's render node as `/dev/dri/renderD128`, plus the host's `render` group | access to the GPU; with several GPUs, map it by PCI address (`/dev/dri/by-path/pci-…-render`) so a renumbering cannot hand over another card |
-| `VK_DRIVER_FILES` / `VK_ICD_FILENAMES` = `/usr/share/vulkan/icd.d/intel_icd.json` (set in the image) | hides `llvmpipe` (software Vulkan on the CPU) and the other drivers. A wrong path means "no Vulkan device" and ONNX Runtime silently runs on the CPU, which the server detects (§5) |
+| `VK_DRIVER_FILES` / `VK_ICD_FILENAMES` = Intel's and NVIDIA's driver files (set in the image) | hides `llvmpipe` (software Vulkan on the CPU) and the other drivers; NVIDIA's file exists only with the NVIDIA runtime (§7). With no existing file there is no Vulkan device and ONNX Runtime silently runs on the CPU, which the server detects (§5) |
 | models and voices mounted read-only | the image contains no models |
 | non-root user | only needs to read the model and voice folders |
 | healthcheck | a Wyoming `describe` → `info` round trip on every endpoint (`python -m wyoming_vulkan.healthcheck`) |
@@ -131,7 +131,7 @@ wyoming_vulkan/
 ### 4.3 Piper (ONNX Runtime WebGPU EP)
 
 - The WebGPU plugin EP is registered once (`ort.register_execution_provider_library`), the device picked from `ort.get_ep_devices()` by `[gpu] vendor_id`, and the session built directly (`PiperVoice(session, config)`, which skips piper's own CPU session).
-- GPU proof: `session.get_providers()[0] == "WebGpuExecutionProvider"`. Without a usable Vulkan device ONNX Runtime silently returns a CPU-only session; that case is caught here. The EP picks the physical GPU itself, so the Vulkan driver restriction (§2) is what guarantees the right one; the GPU name shown in `info` comes from the Vulkan device list.
+- GPU proof: `session.get_providers()[0] == "WebGpuExecutionProvider"`. Without a usable Vulkan device ONNX Runtime silently returns a CPU-only session; that case is caught here. The EP picks the physical GPU itself (by power preference when there are several, §7); the GPU name shown in `info` comes from the Vulkan device list.
 - Small shape and cast nodes run on the CPU EP on purpose; expected.
 
 ### 4.4 Kokoro-82M and KittenTTS (voice packs)
@@ -152,9 +152,9 @@ wyoming_vulkan/
 
 - Fun-CosyVoice3-0.5B-2512 (Apache-2.0): text → Qwen2.5-0.5B language model (speech tokens, 25 per second) → flow-matching DiT (10 Euler steps with classifier-free guidance) → HiFT vocoder, 24 kHz, 9 languages. [cosyvoice.cpp](https://github.com/Lourdle/cosyvoice.cpp) (MIT) runs all of it on ggml, including Vulkan; its models are GGUF (`Lourdle/Fun-CosyVoice3-0.5B-2512-GGUF`, Q8_0).
 - **Child process:** the engine starts `cosyvoice-server --api` on a free loopback port with every voice, waits for `/healthz`, and requests raw PCM from `/v1/audio/speech` (whole sentences; the server's chunked streaming was slower in total without its DiT cache, and that cache crashed it). One request at a time. Closing the engine stops the process.
-- **GPU proof:** the server gets an explicit ggml device (`--backend Vulkan0`, option `gpu_device`) and exits if it does not exist ("failed to initialize backend"), so it cannot fall back silently; that exit becomes `GpuUnavailable` (`igpu`: the pack fails; `auto`: CPU fallback, loud). The device name shown in `info` is the description of the same ggml device in the server process's own ggml list.
+- **GPU proof:** the server gets an explicit ggml device (`--backend VulkanN` for the engine's `gpu`, or the option `gpu_device`) and exits if it does not exist ("failed to initialize backend"), so it cannot fall back silently; that exit becomes `GpuUnavailable` (`igpu`: the pack fails; `auto`: CPU fallback, loud). The device name shown in `info` is the description of the same ggml device in the server process's own ggml list.
 - **Voices** are voice prompts, not built in: `voices/<name>.wav` + `<name>.txt` (the clip's exact transcript) is encoded once at load by `cosyvoice-cli --frontend-only` (speech tokenizer + CAM++ speaker model, ONNX on the CPU, ~4 s) into a cache keyed by the files' contents; `<name>.gguf` is used as is. Every voice speaks every language (cross-lingual). The fetch script provides the upstream example clip (Apache-2.0, a Chinese speaker) as `zh_female`.
-- **Measured on the N305 iGPU:** ~20 s for a 2 s sentence (RTF 9–12); the profile shows ~2.2 s per flow step (matrix products at ~175 GFLOPS, near what ggml gets from this GPU), so it is the GPU's compute, not a build problem. The language model alone runs at ~33 tokens/s. On the CPU RTF ~70. Q4_K_M is no faster than Q8_0. Output is intelligible (0 % word error on a two-sentence test with an English prompt). Off by default (`COSYVOICE_ENABLED`); published numbers (RTF 0.2–0.4 on a Strix Halo iGPU) suggest it becomes usable on a large iGPU or a discrete GPU.
+- **Measured on the N305 iGPU:** ~20 s for a 2 s sentence (RTF 9–12); the profile shows ~2.2 s per flow step (matrix products at ~175 GFLOPS, near what ggml gets from this GPU), so it is the GPU's compute, not a build problem. The language model alone runs at ~33 tokens/s. On the CPU RTF ~70. Q4_K_M is no faster than Q8_0. Output is intelligible (0 % word error on a two-sentence test with an English prompt). Off by default (`COSYVOICE_ENABLED`). **On an RTX 4060:** RTF 0.17–0.19 (~0.7 s per sentence), with `stream = true` first audio after ~0.35 s at RTF ~0.4: usable, with the rest of the stack on the iGPU (§7).
 
 ### 4.7 Engines tested and not added
 
@@ -179,36 +179,22 @@ Parakeet and Whisper with `use_gpu = false`; Piper, Kokoro and KittenTTS with th
 - Log rotation 3 × 10 MB.
 - **Diagnostics page** (`web.py`, port 10312): runs in the same event loop and reads the live engines and the voice registry. The benchmark creates separate engine instances with `create_engine` (so "cold" includes loading, and the serving engines are not disturbed apart from sharing the GPU), one model at a time, and closes each afterwards. Memory per model is the growth of the container's memory (cgroup) during load and warm-up: on an iGPU the model's buffers are system RAM and are charged there, whereas the process RSS misses them.
 
-## 7. Choosing among several GPUs (design, not built yet)
+## 7. Several GPUs (0.9.0)
 
-Goal: pick the GPU per engine, e.g. Whisper and CosyVoice3 on a discrete NVIDIA card, Parakeet and Piper on the iGPU. Today the image exposes only Mesa's Intel driver, and every engine takes the first (only) Vulkan GPU.
+Each engine picks its GPU with `gpu = "intel" | "nvidia" | "amd" | "<part of the Vulkan device name>"` (`GpuConfig.select`; empty = the `[gpu]` default) and its device with `device = "gpu" | "cpu" | "auto"` (`gpu` = `igpu`, the old name).
 
-**Getting an NVIDIA GPU into the container through Vulkan** (NVIDIA Container Toolkit ≥ 1.12, headless Vulkan):
-- `NVIDIA_DRIVER_CAPABILITIES` must include `graphics` (e.g. `compute,utility,graphics`); it replaces the default `compute,utility`. The toolkit then mounts the host's `nvidia_icd.json` (at `/etc/vulkan/icd.d/`) and driver libraries; without the file on the host there is no NVIDIA Vulkan device.
-- The NVIDIA ICD (`libGLX_nvidia.so.0`) needs `libXext.so.6` (fails loudly when missing) and `libEGL.so.1` (fails silently when missing): the image would add `libxext6` and `libegl1`.
-- `VK_DRIVER_FILES` becomes a colon-separated list: `/usr/share/vulkan/icd.d/intel_icd.json:/etc/vulkan/icd.d/nvidia_icd.json`. It stays explicit, so `llvmpipe` stays hidden.
+**Getting an NVIDIA GPU into the container through Vulkan** (NVIDIA Container Toolkit ≥ 1.12, headless Vulkan): the NVIDIA runtime with `NVIDIA_DRIVER_CAPABILITIES` including `graphics` (it replaces the default `compute,utility`); the toolkit then mounts the host's `nvidia_icd.json` at `/etc/vulkan/icd.d/` and the driver libraries. `--gpus all` alone does not. The ICD needs `libXext.so.6` and `libEGL.so.1`, both already in the base image. The image lists both drivers in `VK_DRIVER_FILES` (`intel_icd.json:/etc/vulkan/icd.d/nvidia_icd.json`, still no `llvmpipe`); the loader skips a listed file that does not exist, and the server also removes such files from the variables at start-up (so child processes get a clean list) and accepts the list as long as one file exists.
 
 **How each engine chooses:**
 
-| Engine | Mechanism | Notes |
+| Engine | Mechanism | Proof |
 |---|---|---|
-| Parakeet, Whisper (ggml in-process) | `GGML_VK_VISIBLE_DEVICES` (Vulkan device indices), plus whisper.cpp's `gpu_device` | ggml by default uses all *discrete* GPUs and skips the iGPU once one exists; the variable is read once per process, so both in-process engines see the same set and `gpu_device` picks between them |
-| Piper, Kokoro, Kitten, Pocket (ONNX Runtime WebGPU EP) | `powerPreference` provider option (`low-power` → iGPU, `high-performance` → discrete) | the plugin (0.4.0) chooses the physical GPU itself; the EP device from `get_ep_devices()` does not decide it. An `adapterIndex` option was merged upstream on 2026-09-25 and is not in 0.4.0 |
-| CosyVoice3 (child process) | `gpu_device = "Vulkan1"` → `--backend Vulkan1`; the child can also get its own `GGML_VK_VISIBLE_DEVICES` | the easiest: its environment is separate |
+| Parakeet, Whisper (ggml in-process) | whisper.cpp's `gpu_device` = the index of the matching device among ggml's GPUs (ggml v0.23 lists every Vulkan GPU, integrated ones too) | the library's log line `using VulkanN backend` must name that device |
+| CosyVoice3 (child process) | `--backend VulkanN`, the ggml name of the matching device in this process's list (same loader, same driver files) | the server exits if the device does not exist |
+| Piper, Kokoro, Kitten, Pocket (ONNX Runtime WebGPU plug-in 0.4.0) | `powerPreference`: `low-power` → the integrated GPU, `high-performance` → the discrete one (only when there are several GPUs) | WebGPU EP active; the adapter itself cannot be read back from the plug-in, so the device name shown is the predicted one |
 
-**Config:** per engine `gpu = "auto" | "intel" | "nvidia" | "amd" | "<vendor id>:<device id>"` (default: the `[gpu]` section as today). At start-up the server lists the Vulkan devices once (vendor id, device id, name, type), resolves each engine's `gpu` to a device, then sets `GGML_VK_VISIBLE_DEVICES` before libparakeet/libwhisper are loaded and passes `powerPreference` / `gpu_device` to the others. After loading, each engine's proof checks the device it actually got against the one it asked for (name and vendor), loudly as today. Indices are never configured by hand: they change when a driver is added.
+**Measured limits of the WebGPU plug-in** (Intel iGPU + RTX 4060, KittenTTS): the EP device passed to `add_provider_for_devices` is ignored (with no preference Dawn takes the discrete GPU whichever device is passed); `powerPreference` decides. All sessions of a process share WebGPU context 0: a second session asking for the other GPU silently ran on the first session's GPU; a separate context (`deviceId` > 0) fails without a custom WebGPU instance, and the session silently becomes a CPU session. Hence: all ONNX engines that may use a GPU must ask for the same one (`config.ort_gpu_conflict` refuses anything else at start-up, `make_session` refuses a second GPU at run time), and two discrete GPUs cannot be told apart for them. `adapterIndex` (merged upstream 2026-09-25, not in 0.4.0) would lift this. Concurrent `Run()` on sessions of two GPUs has been reported to crash (onnxruntime #32561); not possible here because of the one-GPU rule.
 
-**Limits to design around:** Vulkan loader variables are per process (ggml and Dawn in the main process share them); the WebGPU plugin can only express "low-power vs high-performance", which is enough for one iGPU + one discrete GPU but not for two discrete GPUs until `adapterIndex` ships; concurrent `Run()` on two WebGPU sessions has been reported to crash on Linux/Vulkan, on one GPU or two (onnxruntime #32561; not seen here so far), so one lock across all ORT GPU sessions is the fallback if it shows up. 
+**A pack with `device = "gpu"` whose GPU is missing** is not offered at all (warning), since it could only fail on first use.
 
-**Measured on an RTX 4060 (driver 580, NVIDIA Container Toolkit 1.18), whole image on the NVIDIA GPU** (`--runtime nvidia`, `NVIDIA_VISIBLE_DEVICES=all`, `NVIDIA_DRIVER_CAPABILITIES=compute,utility,graphics`, `VK_DRIVER_FILES=/etc/vulkan/icd.d/nvidia_icd.json`, `[gpu] name_contains = "NVIDIA"`, `vendor_id = 0x10de`; the base image already has `libxext6` and `libegl1`; note `--gpus all` alone does not mount the Vulkan ICD, the graphics capability needs the NVIDIA runtime): every engine runs and passes its GPU proof unchanged.
-
-| Engine | RTX 4060 | N305 iGPU |
-|---|---|---|
-| Parakeet v3 q8_0 | 0.06–0.12 s per command | 0.45–0.74 s |
-| Whisper small (`audio_ctx` 512) | 0.06–0.08 s | 0.84–0.92 s |
-| Whisper large-v3-turbo q5_0 | 0.16–0.18 s (6/6 exact) | 4.4 s |
-| Piper high | RTF 0.07 | 0.39–0.47 |
-| Kokoro-82M | RTF 0.17 | ~0.78 |
-| KittenTTS nano | RTF 0.03 | 0.14–0.16 |
-| CosyVoice3 Q8_0, whole sentences | RTF 0.17–0.19, ~0.73 s per sentence, 0–2 % word error | 9–12 |
-| CosyVoice3, server streaming | first audio ~0.35 s, RTF ~0.4 | – |
+**Measurements** on the Intel iGPU, the RTX 4060 and the CPU: `README.md` (Measurements).

@@ -100,7 +100,7 @@ class ConfigTests(unittest.TestCase):
         cases = {
             "unknown section": MINIMAL + "\n[extra]\n",
             "unknown server key": "[server]\nport = 1\n" + MINIMAL,
-            "bad device": MINIMAL + 'device = "gpu"\n',
+            "bad device": MINIMAL + 'device = "npu"\n',
             "missing model": '[[tts]]\nname = "v"\nbackend = "piper"\n',
             "no engines": '[server]\nuri = "tcp://0.0.0.0:1"\n',
             "duplicate": MINIMAL + MINIMAL,
@@ -115,6 +115,57 @@ class ConfigTests(unittest.TestCase):
             create_engine(EngineConfig(kind="stt", name="x", backend="nope", model=Path("/m")), gpu)
         with self.assertRaises(ConfigError):  # a TTS backend in an STT slot; fails before importing it
             create_engine(EngineConfig(kind="stt", name="x", backend="piper", model=Path("/m")), gpu)
+
+
+class GpuSelectionTests(unittest.TestCase):
+    def test_selectors(self):
+        default = GpuConfig()
+        self.assertIs(default.select(None), default)
+        self.assertIs(default.select(""), default)
+        self.assertEqual(default.select("NVIDIA"), GpuConfig("NVIDIA", 0x10de))
+        self.assertEqual(default.select("amd"), GpuConfig("AMD", 0x1002))
+        self.assertEqual(default.select("RTX 4060"), GpuConfig("RTX 4060", None))
+
+    def test_engine_gpu_and_device_alias(self):
+        c = load_config(write(MINIMAL + 'device = "gpu"\ngpu = "nvidia"\n[[tts_library]]\npath = "/v"\ngpu = "intel"\ndevice = "gpu"\n'))
+        self.assertEqual((c.stt[0].device, c.stt[0].gpu), ("igpu", "nvidia"))
+        self.assertEqual((c.tts_library[0].device, c.tts_library[0].gpu), ("igpu", "intel"))
+        self.assertNotIn("gpu", c.stt[0].options)
+        engine = create_engine(c.stt[0], c.gpu)
+        self.assertEqual(engine.gpu.name_contains, "NVIDIA", "create_engine applies the engine's own selector")
+
+    def test_onnx_engines_must_share_one_gpu(self):
+        base = MINIMAL + '[[tts]]\nname = "v"\nbackend = "piper"\nmodel = "/v.onnx"\ngpu = "intel"\n'
+        pack = '[[tts_pack]]\nname = "k"\nbackend = "kokoro"\nmodel = "/k.onnx"\ngpu = "nvidia"\n'
+        with self.assertRaisesRegex(ConfigError, "only one GPU per process"):
+            load_config(write(base + pack))
+        load_config(write(base + pack + 'device = "cpu"\n'))  # on the CPU it does not matter
+        load_config(write(base + pack + "enabled = false\n"))  # nor when the pack is off
+        load_config(write(base + pack.replace("kokoro", "cosyvoice")))  # CosyVoice3 runs in its own process
+
+    def test_power_preference(self):
+        from wyoming_vulkan.engines.ggml import GgmlDevice
+        from wyoming_vulkan.engines.ort_session import power_preference
+
+        nv, intel = GgmlDevice("Vulkan0", "NVIDIA GeForce RTX 4060", "gpu"), GgmlDevice("Vulkan1", "Intel(R) Graphics", "igpu")
+        self.assertIsNone(power_preference(intel, [intel]))
+        self.assertEqual(power_preference(intel, [nv, intel]), "low-power")
+        self.assertEqual(power_preference(nv, [nv, intel]), "high-performance")
+        with self.assertRaises(GpuUnavailable):
+            power_preference(nv, [nv, GgmlDevice("Vulkan2", "AMD Radeon RX", "gpu"), intel])
+
+    def test_missing_driver_files_are_dropped(self):
+        with tempfile.TemporaryDirectory() as d:
+            intel = Path(d) / "intel_icd.json"
+            intel.write_text("{}")
+            both = f"{intel}:{d}/nvidia_icd.json"
+            with mock.patch.dict(os.environ, {"VK_DRIVER_FILES": both, "VK_ICD_FILENAMES": both}):
+                self.assertEqual(devices.prune_vulkan_drivers(), [f"{d}/nvidia_icd.json"])
+                self.assertEqual(os.environ["VK_DRIVER_FILES"], str(intel))
+            none = f"{d}/a.json:{d}/b.json"
+            with mock.patch.dict(os.environ, {"VK_DRIVER_FILES": none, "VK_ICD_FILENAMES": ""}):
+                self.assertEqual(devices.prune_vulkan_drivers(), [])
+                self.assertEqual(os.environ["VK_DRIVER_FILES"], none, "nothing left: keep it, so the check reports it")
 
 
 class VulkanIcdTests(unittest.TestCase):
@@ -133,7 +184,9 @@ class VulkanIcdTests(unittest.TestCase):
         good = self.icd("libvulkan_intel.so")
         self.assertIsNone(self.check({"VK_DRIVER_FILES": good, "VK_ICD_FILENAMES": good}))
         self.assertIn("neither", self.check({}))
-        self.assertIn("does not exist", self.check({"VK_DRIVER_FILES": "/nope.json"}))
+        self.assertIn("exists", self.check({"VK_DRIVER_FILES": "/nope.json"}))
+        self.assertIsNone(self.check({"VK_DRIVER_FILES": good + ":/nope/nvidia_icd.json", "VK_ICD_FILENAMES": good}),
+                          "a listed driver that is not in the container (NVIDIA without its runtime) is skipped")
         self.assertIn("software", self.check({"VK_DRIVER_FILES": self.icd("libvulkan_lvp.so")}))
 
 
@@ -791,6 +844,13 @@ class VoicePackTests(unittest.IsolatedAsyncioTestCase):
 
         with self.assertLogs("wyoming_vulkan.voices", "WARNING"):
             r = await self.registry([Unreadable()])
+        self.assertEqual(r.names(), ["en_US-fixed-high"])
+
+    async def test_gpu_only_pack_without_its_gpu_is_left_out(self):
+        pack = FakePack()
+        pack.config.device = "igpu"
+        with mock.patch.object(devices, "gpu_devices", return_value=[]), self.assertLogs("wyoming_vulkan.voices", "WARNING"):
+            r = await self.registry([pack])
         self.assertEqual(r.names(), ["en_US-fixed-high"])
 
     async def test_disabled_pack_is_left_out(self):

@@ -1,5 +1,5 @@
 # wyoming-vulkan: Wyoming speech-to-text (Parakeet, Whisper) and text-to-speech (Piper) for Home Assistant on a
-# Vulkan GPU (tested: Intel iGPU). Every host-specific value is in .env (copy .env.example); the structure (engines,
+# Vulkan GPU (tested: Intel iGPU, NVIDIA RTX 4060). Every host-specific value is in .env (copy .env.example); the structure (engines,
 # endpoints, voice folders) is the server config inline below. Works as a Dockge stack (Dockge edits .env).
 #
 # Build the image first (Dockge cannot build it, it does not see the project folder):
@@ -13,6 +13,12 @@ services:
     pull_policy: never
     container_name: ${CONTAINER_NAME:-wyoming-vulkan}
     restart: unless-stopped
+    # A second GPU from NVIDIA: DOCKER_RUNTIME=nvidia (NVIDIA Container Toolkit) and NVIDIA_VISIBLE_DEVICES; the
+    # "graphics" capability brings NVIDIA's Vulkan driver into the container. Then choose per engine with *_GPU below.
+    runtime: ${DOCKER_RUNTIME:-runc}
+    environment:
+      NVIDIA_VISIBLE_DEVICES: ${NVIDIA_VISIBLE_DEVICES:-}
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility,graphics
     user: "${PUID:-1000}:${PGID:-1000}"   # must be able to read the model and voice folders
     group_add: ["${RENDER_GID}"]          # the host group that owns the render node: getent group render
     devices:
@@ -60,7 +66,9 @@ configs:
       uri = "tcp://0.0.0.0:10311"
       stt = ["whisper"]
 
-      [gpu]                              # how the GPU is recognised
+      # The default GPU (part of its Vulkan name); each engine can pick another with gpu = "intel" | "nvidia" |
+      # "amd" | "<part of the name>", and device = "gpu" | "cpu" | "auto" (GPU, else CPU with a warning).
+      [gpu]
       name_contains = "${GPU_NAME_CONTAINS:-Intel}"
       vendor_id = ${GPU_VENDOR_ID:-0x8086}
 
@@ -70,6 +78,7 @@ configs:
       model = "/data/models/parakeet/${PARAKEET_MODEL:-ggml-parakeet-tdt-0.6b-v3-q8_0.bin}"
       device = "${WYOMING_DEVICE:-auto}"
       languages = "${PARAKEET_LANGUAGES:-en}"   # comma-separated, or auto (all 25 of Parakeet v3)
+      gpu = "${PARAKEET_GPU:-}"
       description = "Parakeet"
       threads = ${STT_THREADS:-4}
 
@@ -78,6 +87,7 @@ configs:
       backend = "whisper.cpp"
       model = "/data/models/whisper/${WHISPER_MODEL:-ggml-small.bin}"
       device = "${WYOMING_DEVICE:-auto}"
+      gpu = "${WHISPER_GPU:-}"
       languages = "auto"                 # every Whisper language (only "en" for .en models)
       description = "${WHISPER_DESCRIPTION:-Whisper small}"
       audio_ctx = ${WHISPER_AUDIO_CTX:-512}
@@ -88,6 +98,7 @@ configs:
       backend = "piper"
       model = "/data/models/piper/${DEFAULT_VOICE:-en_US-ljspeech-high}.onnx"
       device = "${WYOMING_DEVICE:-auto}"
+      gpu = "${ONNX_GPU:-}"              # Piper, Kokoro, Kitten, Pocket: one GPU for all of them (ONNX Runtime limit)
       languages = ["${DEFAULT_VOICE_LANGUAGE:-en_US}"]
 
       # Voice packs: one model, many voices, offered as "<pack>_<voice>" ("Kokoro af_heart [<device>]" in HA) and
@@ -97,26 +108,31 @@ configs:
       backend = "kokoro"
       model = "/data/models/kokoro/model.onnx"
       device = "${WYOMING_DEVICE:-auto}"
+      gpu = "${ONNX_GPU:-}"
 
       [[tts_pack]]
       name = "kitten"                    # KittenTTS nano (15M, the fastest engine here): 8 English voices
       backend = "kitten"
       model = "/data/models/kitten/kitten_tts_nano_v0_8.onnx"
       device = "${WYOMING_DEVICE:-auto}"
+      gpu = "${ONNX_GPU:-}"
 
       [[tts_pack]]
       name = "pocket"                    # Pocket TTS (Kyutai): 6 English voices, streams 80 ms frames (first audio ~0.1 s)
       backend = "pocket"
       model = "/data/models/pocket/pocket-tts-english.onnx"
       device = "${POCKET_DEVICE:-cpu}"   # autoregressive: faster on the CPU than on a small iGPU
+      gpu = "${ONNX_GPU:-}"
       exclude = ["cosette"]              # a very quiet voice that fails half of the round-trip tests
 
       [[tts_pack]]
       name = "cosyvoice"                 # CosyVoice3 0.5B (cosyvoice.cpp): voice cloning, 9 languages, needs a strong GPU
       backend = "cosyvoice"
       model = "/data/models/cosyvoice/CosyVoice3-2512_Q8_0.gguf"
-      enabled = ${COSYVOICE_ENABLED:-false}  # ~10x slower than real time on an Intel N305 iGPU
-      device = "${COSYVOICE_DEVICE:-igpu}"
+      enabled = ${COSYVOICE_ENABLED:-false}  # real time on an RTX 4060; ~10x slower than real time on an N305 iGPU
+      device = "${COSYVOICE_DEVICE:-gpu}"
+      gpu = "${COSYVOICE_GPU:-}"
+      stream = ${COSYVOICE_STREAM:-false}    # true: first audio sooner (0.35 s on an RTX 4060), more GPU time in total
       languages = "auto"                 # every voice speaks all of CosyVoice3's languages
       # voices: /data/models/cosyvoice/voices/<name>.wav + <name>.txt (the clip's exact transcript), or <name>.gguf
 
@@ -140,15 +156,18 @@ configs:
       [[tts_library]]
       path = "/data/models/piper"
       device = "${WYOMING_DEVICE:-auto}"
+      gpu = "${ONNX_GPU:-}"
 
       [[tts_library]]
       path = "/data/voices"
       device = "${WYOMING_DEVICE:-auto}"
+      gpu = "${ONNX_GPU:-}"
       optional = true
       recursive = true
 
       [[tts_library]]
       path = "/voices-extra"
       device = "${WYOMING_DEVICE:-auto}"
+      gpu = "${ONNX_GPU:-}"
       optional = true
       min_age_seconds = ${EXTRA_VOICES_MIN_AGE:-60}

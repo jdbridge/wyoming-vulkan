@@ -69,10 +69,10 @@ RUN cd cosyvoice && cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
 FROM base AS runtime
 COPY requirements.txt /tmp/requirements.txt
 RUN pip install --no-cache-dir --require-hashes --only-binary=:all: -r /tmp/requirements.txt && rm /tmp/requirements.txt
-# Only the Intel Vulkan driver: hides llvmpipe (CPU) and the other drivers. The path is specific to this base image;
-# a wrong one means "no Vulkan device" (the server refuses to start with device = "igpu").
-ENV VK_DRIVER_FILES=/usr/share/vulkan/icd.d/intel_icd.json \
-    VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/intel_icd.json \
+# Only real GPU drivers: Mesa's Intel driver and NVIDIA's (mounted by the NVIDIA runtime, with the "graphics"
+# capability); this hides llvmpipe (CPU) and the rest. The server drops a listed file that is not in the container.
+ENV VK_DRIVER_FILES=/usr/share/vulkan/icd.d/intel_icd.json:/etc/vulkan/icd.d/nvidia_icd.json \
+    VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/intel_icd.json:/etc/vulkan/icd.d/nvidia_icd.json \
     PYTHONUNBUFFERED=1 \
     PYTHONPATH=/opt/wyoming-vulkan
 COPY config/config.example.toml /etc/wyoming-vulkan/config.toml

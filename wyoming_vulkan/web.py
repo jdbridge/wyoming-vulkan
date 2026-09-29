@@ -266,7 +266,7 @@ class DiagnosticsWeb:
                 plan.append(("tts", e.config, [(e.name, None)]))
         if "folders" in engines:
             for lv in v.library_voices.values():
-                cfg = EngineConfig(kind="tts", name=lv.name, backend=lv.library.backend, model=lv.path, device=lv.library.device,
+                cfg = EngineConfig(kind="tts", name=lv.name, backend=lv.library.backend, model=lv.path, device=lv.library.device, gpu=lv.library.gpu,
                                    languages=lv.languages, options=v.speech_options(lv.name, lv.library.options))
                 plan.append(("tts", cfg, [(lv.name, None)]))
         for pack in v.packs.values():

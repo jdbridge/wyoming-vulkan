@@ -55,7 +55,7 @@ async def main() -> int:
         config.server.uri = args.uri
     if args.device:
         for e in config.stt + config.tts + config.tts_library + config.tts_pack:
-            e.device = args.device
+            e.device = "igpu" if args.device == "gpu" else args.device
     for section, entries, kind in (("[[tts]]", config.tts, "tts"), ("[[tts_pack]]", config.tts_pack, "tts_pack")):
         for e in entries:
             if BACKENDS.get(e.backend, ("",))[0] != kind:
@@ -67,6 +67,8 @@ async def main() -> int:
             _LOGGER.error("Config %s: [[tts_library]] %s: %r is not a TTS backend", args.config, lib.path, lib.backend)
             return 2
 
+    for missing in devices.prune_vulkan_drivers():
+        _LOGGER.info("Vulkan driver file %s is not in this container (e.g. no NVIDIA runtime); left out", missing)
     devices.log_environment()
 
     started = time.perf_counter()
@@ -87,7 +89,7 @@ async def main() -> int:
                          engine.runtime.memory_mb)
             (stt if cfg.kind == "stt" else tts).append(engine)
     except GpuUnavailable as err:
-        _LOGGER.error("!!! iGPU requested (device = \"igpu\") but not available: %s", err)
+        _LOGGER.error("!!! GPU requested (device = \"gpu\") but not available: %s", err)
         _LOGGER.error("!!! Refusing to start. Use device = \"auto\" to fall back to the CPU, or \"cpu\".")
         return 3
     except (ConfigError, OSError, RuntimeError) as err:

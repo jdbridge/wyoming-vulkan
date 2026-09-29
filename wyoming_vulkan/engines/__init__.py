@@ -24,4 +24,5 @@ def create_engine(config: EngineConfig, gpu: GpuConfig) -> Engine:
     if kind.split("_")[0] != config.kind:
         raise ConfigError(f"{config.kind} {config.name}: backend {config.backend!r} is a {kind} backend")
     module, cls = target.split(":")
-    return getattr(importlib.import_module(module), cls)(config, gpu)
+    # the engine's own `gpu` selector, else the [gpu] default
+    return getattr(importlib.import_module(module), cls)(config, gpu.select(config.gpu))

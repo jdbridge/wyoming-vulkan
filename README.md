@@ -25,38 +25,43 @@ container, on the GPU you already have: the integrated graphics of a mini PC or 
 > Mesa Vulkan driver (other Intel iGPUs from Gen9 on, Intel Arc, AMD Radeon iGPUs) should work but are untested; see
 > [Other GPUs](#other-gpus).
 
-## Measurements (Intel i3-N305 iGPU)
+## Measurements
 
-Six English voice commands of 1.5–3.4 s (`tests/data/en`), time from the end of speech to the transcript:
+Two GPUs in one machine: the Intel i3-N305's integrated GPU (Alder Lake-N, 32 EUs, single-channel DDR5) and an
+NVIDIA RTX 4060 (8 GB), both through Vulkan, plus the N305's 8 cores for comparison. Measured 2026-09-29 on a
+shared host (load average 3–5 from other containers). Speed-up = CPU time / GPU time (> 1: the GPU is faster).
 
-| Speech-to-text | Per command | Exact | Notes |
-|---|---|---|---|
-| Parakeet v3 q8_0 | 0.45–0.74 s | 6/6 | 25 European languages |
-| Whisper small, ~10 s window | 0.84–0.92 s | 6/6 | multilingual; German test set (`tests/data/de`) 4/4 |
-| Whisper tiny.en, ~10 s window* | 0.13–0.18 s | 4/6 | |
-| Whisper base.en, ~10 s window* | 0.25–0.29 s | 4/6 | 0.82–0.87 s with the full 30 s window |
-| Whisper large-v3-turbo q5_0* | 4.4–4.5 s | 4/6 | too slow for commands on this GPU |
+**Speech-to-text**, six English voice commands of 1.5–3.4 s (`tests/data/en`), median time from the end of speech to
+the transcript:
 
-\* measured on an earlier set of the same six sentences, spoken by a different synthetic voice (Parakeet and Whisper
-small got 5/6 on that set).
+| Model | CPU (8 cores) | Intel iGPU | RTX 4060 | iGPU vs CPU | 4060 vs CPU |
+|---|---|---|---|---|---|
+| Parakeet v3 q8_0 | 0.66 s | 0.67 s | ~0.09 s | 1.0× | ~7× |
+| Whisper small, ~10 s window | 3.66 s | 0.85 s | ~0.07 s | 4.3× | ~50× |
+| Whisper large-v3-turbo q5_0, 30 s window | 42.6 s | 15.7 s | 0.17 s | 2.7× | ~250× |
 
-Text-to-speech, 30 sentences per voice, transcribed back by Parakeet (`tests/tts_roundtrip.py`); real-time factor
-(RTF) = synthesis time / audio length:
+Every model got 5–6 of 6 commands word for word. Whisper tiny.en / base.en with the ~10 s window: 0.13 / 0.25 s on
+the iGPU. German (`tests/data/de`): Whisper small 4/4.
 
-| Text-to-speech | Word error | RTF on the iGPU | RTF on the CPU | Notes |
-|---|---|---|---|---|
-| KittenTTS nano (8 voices) | 0 % | **0.14–0.16** | 0.29 | ~0.6 s per sentence; the larger mini/micro models were 5–10× slower |
-| Piper, medium voice | – | ~0.12 | – | |
-| Piper, high voice | 0.8 % | 0.39–0.47 | ~0.7 | first audio 0.6–0.7 s |
-| Kokoro-82M fp32 (4 voices tested) | 0–0.7 % | 0.76–0.79 | ~1.0 | ~2.5 s for a 3 s sentence; fp16 exports produce NaNs on WebGPU |
-| Pocket TTS (5 voices) | 0 % | 1.84 | **0.42** | runs on the CPU; streams 80 ms frames, first audio after ~0.07 s |
-| CosyVoice3 0.5B Q8_0 (off by default) | – | 9–12 | ~70 | ~20 s for a 2 s sentence: the flow model's 10 steps take ~2.2 s each here; needs a stronger GPU |
+**Text-to-speech**, 10 sentences per voice, real-time factor (RTF = synthesis time / audio length; lower is faster),
+each voice transcribed back by Parakeet (`tests/tts_roundtrip.py`):
 
-A folder voice or a voice pack loads on first use (Piper voice ~2.5 s, Kokoro ~3–7 s, Kitten ~2.6 s, Pocket ~3.6 s).
+| Model | CPU (8 cores) | Intel iGPU | RTX 4060 | iGPU vs CPU | 4060 vs CPU | Notes |
+|---|---|---|---|---|---|---|
+| KittenTTS nano (8 voices) | 0.14 | 0.14 | 0.027 | 1.0× | 5× | 0 % word error |
+| Piper, high voice | 0.47 | 0.39 | 0.069 | 1.2× | 7× | first audio after the first sentence |
+| Kokoro-82M fp32 (42 voices) | 0.56 | 0.76 | 0.17 | 0.7× | 3× | fp16 exports give NaN on WebGPU |
+| Pocket TTS (5 voices) | **0.36** | 2.19 | 3.32 | 0.2× | 0.1× | streams 80 ms frames: first audio 0.07 s on the CPU; many tiny sequential steps suit the CPU |
+| CosyVoice3 0.5B Q8_0 | ~72 | ~10 | **0.17–0.19** | ~7× | ~400× | voice cloning; streaming on the 4060: first audio 0.35 s at RTF ~0.4 |
 
-Start-up (loading and warming up Parakeet, Whisper small and one voice): ~17 s. Speech-to-text and text-to-speech at
-the same moment share the GPU (each ~1.5–2× slower). Without the GPU (CPU fallback on the same machine): Parakeet
-0.45–0.8 s, Whisper small ~3.7 s, first audio ~1.3 s.
+What this means: small models (Kitten, Piper, Kokoro, Parakeet) are limited by per-operation overhead, so a small
+iGPU barely beats 8 CPU cores and a big GPU gives 3–7×; large transformers (Whisper large, CosyVoice3) are limited by
+compute, where the RTX 4060 (with matrix cores) is 50–400× faster than the CPU and the only one that runs CosyVoice3
+in real time. On the iGPU the value is mostly that it takes the work off the CPU.
+
+A folder voice or a voice pack loads on first use (Piper voice ~2.5 s, Kokoro ~3–7 s, Kitten ~2.6 s, Pocket ~3.6 s,
+CosyVoice3 ~16 s on the 4060). Start-up (loading and warming up Parakeet, Whisper small and one voice): ~17 s.
+Speech-to-text and text-to-speech at the same moment share the GPU (each ~1.5–2× slower).
 
 ## Requirements
 
@@ -99,7 +104,8 @@ config when it runs without Compose.
 
 | Topic | How |
 |---|---|
-| Device | `WYOMING_DEVICE=auto` (GPU, else CPU with a warning), `igpu` (refuse to start without the GPU), `cpu` |
+| Device | `WYOMING_DEVICE=auto` (GPU, else CPU with a warning), `gpu` (refuse to start without the GPU), `cpu` |
+| Which GPU | `PARAKEET_GPU`, `WHISPER_GPU`, `ONNX_GPU` (Piper, Kokoro, Kitten, Pocket together), `COSYVOICE_GPU`: `intel`, `nvidia`, `amd` or part of the GPU's Vulkan name; empty = `GPU_NAME_CONTAINS`. See [Several GPUs](#several-gpus) |
 | Other models | `PARAKEET_MODEL`, `WHISPER_MODEL` in `DATA_DIR/models/parakeet` and `…/whisper` (`scripts/fetch-models.sh --list`) |
 | Languages | `PARAKEET_LANGUAGES` (default `en`, `auto` = all 25 of Parakeet v3); Whisper offers all of its languages |
 | Whisper speed | `WHISPER_AUDIO_CTX=512` (~10 s window, ~3× faster; longer audio uses the full window automatically), `0` = always 30 s |
@@ -139,16 +145,30 @@ Test audio: `tests/data/en` (public-domain LJ Speech voice) and `tests/data/de` 
 
 ## Other GPUs
 
-The image restricts Vulkan to Mesa's Intel driver (`VK_DRIVER_FILES=/usr/share/vulkan/icd.d/intel_icd.json`), which
-also hides `llvmpipe` (software Vulkan on the CPU). For another GPU, set `VK_DRIVER_FILES` and `VK_ICD_FILENAMES` in
-the compose file to its driver file (e.g. `radeon_icd.json` for AMD) and `GPU_NAME_CONTAINS` / `GPU_VENDOR_ID` in
-`.env` (AMD: `AMD` / `0x1002`). Reports of what works are welcome.
+The image lists Mesa's Intel driver and NVIDIA's (`VK_DRIVER_FILES`), which also hides `llvmpipe` (software Vulkan
+on the CPU); a listed file that is not in the container is skipped. For an AMD GPU, set `VK_DRIVER_FILES` and
+`VK_ICD_FILENAMES` in the compose file to its driver file (`/usr/share/vulkan/icd.d/radeon_icd.json`) and
+`GPU_NAME_CONTAINS` / `GPU_VENDOR_ID` in `.env` (`AMD` / `0x1002`). Reports of what works are welcome.
 
-**NVIDIA** works through its Vulkan driver (tested on an RTX 4060): run the container with the NVIDIA runtime and
-`NVIDIA_DRIVER_CAPABILITIES=compute,utility,graphics` (the graphics capability brings the Vulkan driver file into the
-container; `--gpus all` alone does not), `VK_DRIVER_FILES=/etc/vulkan/icd.d/nvidia_icd.json` and `NVIDIA` / `0x10de`.
-Everything is 4–25× faster there than on the Intel iGPU, and CosyVoice3 becomes real time (RTF ~0.18); numbers in
-`DESIGN.md` §7. Choosing a different GPU per engine is not built yet.
+**NVIDIA** works through its Vulkan driver (tested: RTX 4060, driver 580, NVIDIA Container Toolkit 1.18): set
+`DOCKER_RUNTIME=nvidia` and `NVIDIA_VISIBLE_DEVICES` (`all`, an index or the GPU's UUID from `nvidia-smi -L`) in
+`.env`. The compose file adds the `graphics` capability, which brings NVIDIA's Vulkan driver file into the container
+(`--gpus all` alone does not). If the NVIDIA runtime cannot start (driver update, toolkit problem), the whole
+container does not start, including the engines on another GPU.
+
+### Several GPUs
+
+Each engine can use a different GPU, or the CPU: `device = "gpu" | "cpu" | "auto"` and `gpu = "intel" | "nvidia" |
+"amd" | "<part of the name>"` per engine in the inline config (`*_GPU` in `.env`). For example: Parakeet, Whisper
+small and the Piper voices on the iGPU (always there), CosyVoice3 on the NVIDIA card. The log lists the Vulkan GPUs
+and where each engine runs, and Home Assistant shows it: `CosyVoice zh_female [NVIDIA GeForce RTX 4060]`.
+
+- **Parakeet, Whisper and CosyVoice3** can each use any GPU.
+- **Piper, Kokoro, Kitten and Pocket** share one GPU: ONNX Runtime's WebGPU plug-in (0.4.0) runs all sessions of a
+  process on one GPU, and picks it only by power preference (integrated vs discrete). The server refuses a config
+  where they ask for different GPUs (each can still use `device = "cpu"`), and it cannot choose between two discrete
+  GPUs for them.
+- A voice pack with `device = "gpu"` whose GPU is missing is not offered (warning in the log).
 
 ## Troubleshooting
 
@@ -157,7 +177,7 @@ Everything is 4–25× faster there than on the Intel iGPU, and CosyVoice3 becom
 | `!!! … FALLING BACK TO CPU` / `[CPU fallback]` in HA | the GPU path is not usable; the reason is in the same line |
 | `no ggml GPU device contains 'Intel'` | no Vulkan GPU in the container: render node not mapped, wrong `RENDER_GID`, or no Mesa driver for this GPU |
 | `ONNX Runtime session providers are ['CPUExecutionProvider'], not WebGPU` | ONNX Runtime found no Vulkan device (the silent CPU fallback it would otherwise do) |
-| `Vulkan driver file … does not exist` | wrong `VK_DRIVER_FILES` path |
+| `no Vulkan driver file of … exists` | wrong `VK_DRIVER_FILES` path (a missing NVIDIA file alone is fine: it is only there with the NVIDIA runtime) |
 | `tts library … (optional): … not offered` | an optional voice folder is missing or not answering |
 
 ## Project layout

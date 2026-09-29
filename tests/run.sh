@@ -41,6 +41,10 @@ docker run --rm --entrypoint python -v "$PWD/tests:/tests:ro" -v "$CONFIG:/deplo
 echo "== integration ($MODE)"
 # (docker run --device cannot take by-path names, their colons clash with its syntax: resolve the link first)
 GPU=(--device "$(readlink -f "$RENDER_DEVICE"):/dev/dri/renderD128" --group-add "$RENDER_GID")
+# a second GPU from NVIDIA, as in compose (DOCKER_RUNTIME=nvidia in the env file)
+if [[ $(val DOCKER_RUNTIME runc) == nvidia ]]; then
+  GPU+=(--runtime nvidia -e "NVIDIA_VISIBLE_DEVICES=$(val NVIDIA_VISIBLE_DEVICES all)" -e NVIDIA_DRIVER_CAPABILITIES=compute,utility,graphics)
+fi
 FOLDERS=()
 [[ -d $EXTRA ]] && FOLDERS+=(--mount "type=bind,source=$EXTRA,target=/voices-extra,readonly")
 MIN_VOICES=1

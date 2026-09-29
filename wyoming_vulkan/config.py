@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
 
-DEVICES = ("igpu", "cpu", "auto")
+DEVICES = ("gpu", "igpu", "cpu", "auto")  # "gpu" and "igpu" mean the same: the GPU chosen by `gpu`, never the CPU
 DEFAULT_CONFIG = Path("/etc/wyoming-vulkan/config.toml")
 
 
@@ -26,10 +26,24 @@ class ServerConfig:
     web_host: str = "0.0.0.0"
 
 
+# `gpu = "..."` shortcuts: name substring of the Vulkan device and PCI vendor id
+GPU_ALIASES = {"intel": ("Intel", 0x8086), "nvidia": ("NVIDIA", 0x10de), "amd": ("AMD", 0x1002)}
+
+
 @dataclass
 class GpuConfig:
+    """Which GPU an engine uses: the Vulkan device whose name contains `name_contains`. [gpu] is the default for every
+    engine; an engine's `gpu = "intel" | "nvidia" | "amd" | "<part of the device name>"` overrides it."""
+
     name_contains: str = "Intel"  # substring of the ggml / Vulkan device description
-    vendor_id: int = 0x8086  # PCI vendor of the ONNX Runtime EP device
+    vendor_id: Optional[int] = 0x8086  # PCI vendor (None: any)
+
+    def select(self, selector: Optional[str]) -> "GpuConfig":
+        """The GPU for an engine whose config says `gpu = selector` (None or "": this default)."""
+        if not selector:
+            return self
+        alias = GPU_ALIASES.get(selector.strip().lower())
+        return GpuConfig(*alias) if alias else GpuConfig(name_contains=selector.strip(), vendor_id=None)
 
 
 @dataclass
@@ -45,6 +59,7 @@ class EngineConfig:
     backend: str
     model: Path
     device: str = "igpu"
+    gpu: Optional[str] = None  # which GPU (GpuConfig.select); None: the [gpu] section
     languages: Optional[list[str]] = field(default_factory=lambda: ["en"])  # None ("auto"): the engine decides
     description: Optional[str] = None
     attribution: Optional[Attribution] = None
@@ -70,6 +85,7 @@ class LibraryConfig:
     path: Path
     backend: str = "piper"
     device: str = "auto"
+    gpu: Optional[str] = None  # which GPU for these voices (GpuConfig.select); None: the [gpu] section
     optional: bool = False  # missing or unreadable folder: warning instead of refusing to start
     recursive: bool = False  # also scan subfolders (e.g. piper/); the first file with a name wins
     min_age_seconds: float = 60.0  # skip files changed more recently (a training run may still be writing them)
@@ -106,7 +122,16 @@ class Config:
         return [main, *self.endpoint]
 
 
-_ENGINE_KEYS = {"name", "backend", "model", "device", "languages", "description", "attribution"}
+_ENGINE_KEYS = {"name", "backend", "model", "device", "gpu", "languages", "description", "attribution"}
+
+# backends that run on ONNX Runtime's WebGPU plug-in: all of them share one GPU per process (see ort_gpu_conflict)
+ORT_BACKENDS = {"piper", "kokoro", "kitten", "pocket"}
+
+
+def _device(where: str, value: str) -> str:
+    if value not in DEVICES:
+        raise ConfigError(f"{where}: device must be one of {DEVICES}, not {value!r}")
+    return "igpu" if value == "gpu" else value
 
 
 def _section(raw: dict, key: str, cls):
@@ -131,9 +156,7 @@ def _engine(kind: str, i: int, data: dict) -> EngineConfig:
     for key in ("name", "backend", "model"):
         if not data.get(key):
             raise ConfigError(f"{where}: '{key}' is required")
-    device = data.get("device", "igpu")
-    if device not in DEVICES:
-        raise ConfigError(f"{where}: device must be one of {DEVICES}, not {device!r}")
+    device = _device(where, data.get("device", "igpu"))
     attribution = data.get("attribution")
     if attribution is not None:
         attribution = Attribution(**attribution)
@@ -143,6 +166,7 @@ def _engine(kind: str, i: int, data: dict) -> EngineConfig:
         backend=data["backend"],
         model=Path(data["model"]),
         device=device,
+        gpu=data.get("gpu") or None,
         languages=_languages(data.get("languages", ["en"])),
         description=data.get("description"),
         attribution=attribution,
@@ -150,7 +174,7 @@ def _engine(kind: str, i: int, data: dict) -> EngineConfig:
     )
 
 
-_LIBRARY_KEYS = {"path", "backend", "device", "optional", "recursive", "min_age_seconds", "languages"}
+_LIBRARY_KEYS = {"path", "backend", "device", "gpu", "optional", "recursive", "min_age_seconds", "languages"}
 
 
 def _libraries(i: int, data: dict) -> list[LibraryConfig]:
@@ -160,10 +184,9 @@ def _libraries(i: int, data: dict) -> list[LibraryConfig]:
     paths = [paths] if isinstance(paths, str) else paths
     if not paths or not all(isinstance(p, str) and p for p in paths):
         raise ConfigError(f"{where}: 'path' is required (a folder or a list of folders)")
-    device = data.get("device", "auto")
-    if device not in DEVICES:
-        raise ConfigError(f"{where}: device must be one of {DEVICES}, not {device!r}")
     known = {k: data[k] for k in _LIBRARY_KEYS - {"path"} if k in data}
+    known["device"] = _device(where, data.get("device", "auto"))
+    known["gpu"] = data.get("gpu") or None
     options = {k: v for k, v in data.items() if k not in _LIBRARY_KEYS}
     return [LibraryConfig(path=Path(p), **known, options=dict(options)) for p in paths]
 
@@ -211,6 +234,9 @@ def load_config(path: Path) -> Config:
     )
     if not (config.stt or config.tts or config.tts_library or config.tts_pack):
         raise ConfigError("no [[stt]], [[tts]], [[tts_library]] or [[tts_pack]] configured")
+    conflict = ort_gpu_conflict(config)
+    if conflict:
+        raise ConfigError(conflict)
     for engines in (config.stt, config.tts, config.tts_pack):
         names = [e.name for e in engines]
         if len(names) != len(set(names)):
@@ -226,3 +252,22 @@ def load_config(path: Path) -> Config:
         if ep.stt == [] and not ep.tts:
             raise ConfigError(f"endpoint {ep.uri} offers neither stt nor tts")
     return config
+
+
+def ort_gpu_conflict(config: Config) -> Optional[str]:
+    """ONNX Runtime's WebGPU plug-in (0.4.0) runs every session of a process on the GPU of the first one (measured: a
+    second session asking for another GPU silently ran on the first). So all ONNX engines that may use a GPU must ask
+    for the same one; otherwise say which differ."""
+    wanted: dict[str, list[str]] = {}
+    entries = [(f"[[tts]] {e.name}", e.backend, e.device, e.gpu) for e in config.tts]
+    entries += [(f"[[tts_pack]] {e.name}", e.backend, e.device, e.gpu) for e in config.tts_pack
+                if str(e.options.get("enabled", True)).lower() not in ("false", "0", "no", "off")]
+    entries += [(f"[[tts_library]] {lib.path}", lib.backend, lib.device, lib.gpu) for lib in config.tts_library]
+    for where, backend, device, gpu in entries:
+        if backend in ORT_BACKENDS and device != "cpu":
+            wanted.setdefault(config.gpu.select(gpu).name_contains, []).append(where)
+    if len(wanted) > 1:
+        detail = "; ".join(f"{name!r}: {', '.join(items)}" for name, items in wanted.items())
+        return ("the ONNX engines (Piper, Kokoro, Kitten, Pocket) can use only one GPU per process, but ask for "
+                f"several ({detail}); give them the same gpu, or device = \"cpu\"")
+    return None

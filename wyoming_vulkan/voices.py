@@ -187,6 +187,11 @@ class VoiceRegistry:
             if str(engine.config.options.get("enabled", True)).lower() in ("false", "0", "no", "off"):
                 _LOGGER.info("tts pack %s: disabled (enabled = false)", engine.name)
                 continue
+            if engine.config.device == "igpu" and not devices.vulkan_gpu_name(engine.gpu.name_contains):
+                # device = "gpu" never falls back to the CPU, so without its GPU the pack could only fail on first use
+                _LOGGER.warning("tts pack %s: device = \"gpu\" but no Vulkan GPU contains %r (have: %s); its voices are not offered",
+                                engine.name, engine.gpu.name_contains, ", ".join(d.description for d in devices.gpu_devices()) or "none")
+                continue
             try:
                 voices = await asyncio.wait_for(asyncio.to_thread(engine.list_voices), SCAN_TIMEOUT_S * 2)
             except Exception as err:  # missing files, NAS not answering
@@ -310,16 +315,16 @@ class VoiceRegistry:
 
     # ---- what info advertises ----
 
-    def _predicted_label(self, device: str) -> str:
-        """Where a not-yet-loaded voice would run: as the loaded voices on the same kind of device do."""
+    def _predicted_label(self, device: str, gpu: GpuConfig) -> str:
+        """Where a not-yet-loaded voice would run: as loaded voices on the same GPU do, else that GPU's Vulkan name."""
         if device == "cpu":
             return "CPU"
         loaded = list(self.fixed.values()) + [v.engine for v in self.library_voices.values() if v.engine]
         loaded += [p.engine for p in self.packs.values() if p.loaded]
         for e in loaded:
-            if e.config.device != "cpu":
+            if e.config.device != "cpu" and e.gpu.name_contains == gpu.name_contains:
                 return e.runtime.label()
-        return "not loaded"
+        return devices.vulkan_gpu_name(gpu.name_contains) or "not loaded"
 
     def voices(self) -> list[VoiceInfo]:
         out = [
@@ -328,12 +333,12 @@ class VoiceRegistry:
             for e in self.fixed.values()
         ]
         for v in self.library_voices.values():
-            label = v.engine.runtime.label() if v.engine else self._predicted_label(v.library.device)
+            label = v.engine.runtime.label() if v.engine else self._predicted_label(v.library.device, self.gpu.select(v.library.gpu))
             out.append(VoiceInfo(v.name, f"{_title(v.library.backend)} {_strip_language(v.name)} [{label}]", v.languages, v.library.backend))
         for name, (pack, voice) in self.pack_voices.items():
             if pack.failed:
                 continue
-            label = pack.engine.runtime.label() if pack.loaded else self._predicted_label(pack.engine.config.device)
+            label = pack.engine.runtime.label() if pack.loaded else self._predicted_label(pack.engine.config.device, pack.engine.gpu)
             title = pack.engine.config.description or _title(pack.engine.config.backend)
             out.append(VoiceInfo(name, f"{title} {voice} [{label}]", pack.voices[voice], pack.engine.config.backend))
         return out
@@ -393,7 +398,7 @@ class VoiceRegistry:
             library = entry.library
             config = EngineConfig(
                 kind="tts", name=entry.name, backend=library.backend, model=entry.path, device=library.device,
-                languages=entry.languages, options=self.speech_options(entry.name, library.options),
+                gpu=library.gpu, languages=entry.languages, options=self.speech_options(entry.name, library.options),
             )
             t = time.perf_counter()
             rss0 = devices.memory_mb()

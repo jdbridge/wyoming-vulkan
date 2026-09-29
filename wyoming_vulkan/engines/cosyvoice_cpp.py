@@ -5,18 +5,21 @@ versions). So it runs as a child process, `cosyvoice-server --api` on 127.0.0.1,
 Voices are voice prompts: a reference clip plus its transcript, encoded once by the frontend (two ONNX models, CPU)
 into a prompt file. CosyVoice3 has no built-in voices; every voice speaks every supported language.
 
-GPU proof: the server gets an explicit ggml device name (`--backend Vulkan0`) and exits if that device does not exist,
-so it cannot fall back to the CPU silently. The image's VK_DRIVER_FILES exposes only the Intel driver.
+GPU choice and proof: the engine's `gpu` selector picks a Vulkan device from this process's ggml device list (same
+loader, same driver files as the child); the server gets that device's ggml name (`--backend Vulkan1`) and exits if
+it does not exist, so it cannot fall back to the CPU silently.
 
-Measured on an Intel N305 (ADL-N iGPU): RTF ~12 (the flow model runs 10 diffusion steps of ~2.2 s each per short
-sentence): too slow for a voice assistant here, meant for stronger GPUs. On the CPU it is slower still (RTF ~70).
+Measured: RTX 4060 RTF 0.17-0.19 (~0.7 s per sentence; with stream = true first audio after ~0.35 s at RTF ~0.4);
+Intel N305 iGPU RTF ~10 (10 diffusion steps of ~2.2 s each per short sentence: too slow for a voice assistant);
+CPU RTF ~70.
 Files (Lourdle/Fun-CosyVoice3-0.5B-2512-GGUF; scripts/fetch-models.sh cosyvoice):
   <dir>/CosyVoice3-2512_Q8_0.gguf                                          the model
   <dir>/frontend/speech_tokenizer_v3.int8.onnx, <dir>/frontend/campplus.onnx  frontend (only for .wav voices)
   <dir>/voices/<name>.gguf                                                 an encoded voice prompt, or
   <dir>/voices/<name>.wav + <name>.txt                                     a clip (5-15 s) and its exact transcript
 Options: voices (folder, default <model dir>/voices), frontend (folder, default <model dir>/frontend), cache (folder
-for encoded .wav voices, default /tmp/cosyvoice-voices), gpu_device (ggml device, default Vulkan0), threads,
+for encoded .wav voices, default /tmp/cosyvoice-voices), gpu_device (a ggml device name such as Vulkan1, instead of
+the `gpu` selector), threads,
 stream (false: whole sentences; the server's chunked streaming is slower in total), seed, start_timeout (s),
 length_scale.
 """
@@ -98,7 +101,9 @@ class CosyVoiceEngine(TtsPack):
         prompts = {name: (self._encode(name, p) if p.suffix == ".wav" else p) for name, p in self._voice_files().items()}
         if not prompts:
             raise RuntimeError("no voices")
-        gpu_device = str(self.config.options.get("gpu_device") or "Vulkan0")
+        gpu_device, description = "", "CPU"
+        if device == "igpu":
+            gpu_device, description = self._gpu_device()
         backend = "CPU" if device == "cpu" else gpu_device
         with socket.socket() as s:  # a free port on the loopback interface
             s.bind(("127.0.0.1", 0))
@@ -137,10 +142,31 @@ class CosyVoiceEngine(TtsPack):
         if device == "cpu":
             self.runtime.device_name, self.runtime.detail = "CPU", "cosyvoice-server --backend CPU"
         else:
-            self.runtime.device_name = _ggml_description(gpu_device) or gpu_device
+            self.runtime.device_name = description
             self.runtime.detail = f"cosyvoice-server --backend {gpu_device} (pid {self.proc.pid})"
         _LOGGER.info("tts pack %s: cosyvoice-server on port %d with %d voices on %s", self.name, self.port, len(prompts),
                      self.runtime.summary())
+
+    def _gpu_device(self) -> tuple[str, str]:
+        """(ggml device name, description) for this engine's GPU: the `gpu_device` option, else the `gpu` selector."""
+        from .. import devices
+        from .ggml import list_devices
+
+        explicit = self.config.options.get("gpu_device")
+        try:
+            listed = list_devices()
+        except OSError:
+            listed = []
+        if explicit:
+            return str(explicit), next((d.description for d in listed if d.name == explicit), str(explicit))
+        problem = devices.vulkan_icd_problem()
+        if problem:
+            raise GpuUnavailable(problem)
+        found = [d for d in listed if d.type in ("gpu", "igpu") and self.gpu.name_contains in d.description]
+        if not found:
+            raise GpuUnavailable(f"no Vulkan GPU contains {self.gpu.name_contains!r}; found "
+                                 + (", ".join(d.description for d in listed if d.type in ("gpu", "igpu")) or "none"))
+        return found[0].name, found[0].description
 
     def _log_output(self, proc: subprocess.Popen) -> None:
         for line in proc.stdout:
@@ -189,13 +215,3 @@ class CosyVoiceEngine(TtsPack):
                 proc.wait(10)
             except subprocess.TimeoutExpired:
                 proc.kill()
-
-
-def _ggml_description(name: str) -> str:
-    """The description of a ggml device of this process (the server's ggml sees the same Vulkan devices)."""
-    try:
-        from .ggml import list_devices
-
-        return next((d.description for d in list_devices() if d.name == name), "")
-    except OSError:
-        return ""

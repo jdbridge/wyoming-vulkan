@@ -144,6 +144,12 @@ also hides `llvmpipe` (software Vulkan on the CPU). For another GPU, set `VK_DRI
 the compose file to its driver file (e.g. `radeon_icd.json` for AMD) and `GPU_NAME_CONTAINS` / `GPU_VENDOR_ID` in
 `.env` (AMD: `AMD` / `0x1002`). Reports of what works are welcome.
 
+**NVIDIA** works through its Vulkan driver (tested on an RTX 4060): run the container with the NVIDIA runtime and
+`NVIDIA_DRIVER_CAPABILITIES=compute,utility,graphics` (the graphics capability brings the Vulkan driver file into the
+container; `--gpus all` alone does not), `VK_DRIVER_FILES=/etc/vulkan/icd.d/nvidia_icd.json` and `NVIDIA` / `0x10de`.
+Everything is 4–25× faster there than on the Intel iGPU, and CosyVoice3 becomes real time (RTF ~0.18); numbers in
+`DESIGN.md` §7. Choosing a different GPU per engine is not built yet.
+
 ## Troubleshooting
 
 | Log | Meaning |

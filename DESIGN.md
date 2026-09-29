@@ -198,4 +198,17 @@ Goal: pick the GPU per engine, e.g. Whisper and CosyVoice3 on a discrete NVIDIA 
 
 **Config:** per engine `gpu = "auto" | "intel" | "nvidia" | "amd" | "<vendor id>:<device id>"` (default: the `[gpu]` section as today). At start-up the server lists the Vulkan devices once (vendor id, device id, name, type), resolves each engine's `gpu` to a device, then sets `GGML_VK_VISIBLE_DEVICES` before libparakeet/libwhisper are loaded and passes `powerPreference` / `gpu_device` to the others. After loading, each engine's proof checks the device it actually got against the one it asked for (name and vendor), loudly as today. Indices are never configured by hand: they change when a driver is added.
 
-**Limits to design around:** Vulkan loader variables are per process (ggml and Dawn in the main process share them); the WebGPU plugin can only express "low-power vs high-performance", which is enough for one iGPU + one discrete GPU but not for two discrete GPUs until `adapterIndex` ships; concurrent `Run()` on two WebGPU sessions has been reported to crash on Linux/Vulkan, on one GPU or two (onnxruntime #32561; not seen here so far), so one lock across all ORT GPU sessions is the fallback if it shows up. Not tested yet on an NVIDIA GPU.
+**Limits to design around:** Vulkan loader variables are per process (ggml and Dawn in the main process share them); the WebGPU plugin can only express "low-power vs high-performance", which is enough for one iGPU + one discrete GPU but not for two discrete GPUs until `adapterIndex` ships; concurrent `Run()` on two WebGPU sessions has been reported to crash on Linux/Vulkan, on one GPU or two (onnxruntime #32561; not seen here so far), so one lock across all ORT GPU sessions is the fallback if it shows up. 
+
+**Measured on an RTX 4060 (driver 580, NVIDIA Container Toolkit 1.18), whole image on the NVIDIA GPU** (`--runtime nvidia`, `NVIDIA_VISIBLE_DEVICES=all`, `NVIDIA_DRIVER_CAPABILITIES=compute,utility,graphics`, `VK_DRIVER_FILES=/etc/vulkan/icd.d/nvidia_icd.json`, `[gpu] name_contains = "NVIDIA"`, `vendor_id = 0x10de`; the base image already has `libxext6` and `libegl1`; note `--gpus all` alone does not mount the Vulkan ICD, the graphics capability needs the NVIDIA runtime): every engine runs and passes its GPU proof unchanged.
+
+| Engine | RTX 4060 | N305 iGPU |
+|---|---|---|
+| Parakeet v3 q8_0 | 0.06–0.12 s per command | 0.45–0.74 s |
+| Whisper small (`audio_ctx` 512) | 0.06–0.08 s | 0.84–0.92 s |
+| Whisper large-v3-turbo q5_0 | 0.16–0.18 s (6/6 exact) | 4.4 s |
+| Piper high | RTF 0.07 | 0.39–0.47 |
+| Kokoro-82M | RTF 0.17 | ~0.78 |
+| KittenTTS nano | RTF 0.03 | 0.14–0.16 |
+| CosyVoice3 Q8_0, whole sentences | RTF 0.17–0.19, ~0.73 s per sentence, 0–2 % word error | 9–12 |
+| CosyVoice3, server streaming | first audio ~0.35 s, RTF ~0.4 | – |

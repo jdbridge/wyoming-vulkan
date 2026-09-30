@@ -181,7 +181,7 @@ class DiagnosticsWeb:
 
     def status(self) -> dict[str, Any]:
         v = self.voices
-        tts_models = [self._engine_row(e, "fixed voice", loaded=True, voices=[e.name]) for e in v.fixed.values()]
+        tts_models = [self._engine_row(e, "fixed voice", loaded=v.is_warm(e.name), voices=[e.name]) for e in v.fixed.values()]
         for lv in v.library_voices.values():
             if lv.engine is not None:
                 row = self._engine_row(lv.engine, "folder voice", loaded=True, voices=[lv.name])
@@ -303,7 +303,8 @@ class DiagnosticsWeb:
 
     async def _fresh(self, cfg: EngineConfig):
         """A separate engine instance (not the one serving requests), so "cold" really includes loading."""
-        engine = create_engine(cfg, self.config.gpu)
+        # TTS: a worker of its own, exactly as serving would start one; STT: in this process, as served
+        engine = self.voices.factory(cfg, self.config.gpu) if cfg.kind == "tts" else create_engine(cfg, self.config.gpu)
         rss0 = devices.memory_mb()
         t = time.perf_counter()
         await asyncio.to_thread(engine.load)

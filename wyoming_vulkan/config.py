@@ -21,7 +21,7 @@ class ServerConfig:
     name: Optional[str] = None  # program name HA shows for the main endpoint's STT (default: first engine's label)
     samples_per_chunk: int = 1024  # audio-chunk size sent to clients, as in wyoming-piper
     max_audio_seconds: float = 60.0  # longer STT input is cut off (HA's VAD ends commands long before)
-    max_loaded_voices: int = 2  # library voices kept loaded at once (least recently used is unloaded); [[tts]] always
+    max_warm_models: int = 1  # TTS models kept loaded (each in its own worker); the least recently used one is stopped
     web_port: int = 10312  # diagnostics web page (wyoming_vulkan/web.py); 0 = off
     web_host: str = "0.0.0.0"
 
@@ -124,9 +124,6 @@ class Config:
 
 _ENGINE_KEYS = {"name", "backend", "model", "device", "gpu", "languages", "description", "attribution"}
 
-# backends that run on ONNX Runtime's WebGPU plug-in: all of them share one GPU per process (see ort_gpu_conflict)
-ORT_BACKENDS = {"piper", "kokoro", "kitten", "pocket"}
-
 
 def _device(where: str, value: str) -> str:
     if value not in DEVICES:
@@ -135,7 +132,9 @@ def _device(where: str, value: str) -> str:
 
 
 def _section(raw: dict, key: str, cls):
-    data = raw.get(key, {})
+    data = dict(raw.get(key, {}))
+    if key == "server" and "max_loaded_voices" in data:  # the name before 0.10.0
+        data.setdefault("max_warm_models", data.pop("max_loaded_voices"))
     unknown = set(data) - set(cls.__dataclass_fields__)
     if unknown:
         raise ConfigError(f"[{key}]: unknown keys {sorted(unknown)}")
@@ -234,9 +233,6 @@ def load_config(path: Path) -> Config:
     )
     if not (config.stt or config.tts or config.tts_library or config.tts_pack):
         raise ConfigError("no [[stt]], [[tts]], [[tts_library]] or [[tts_pack]] configured")
-    conflict = ort_gpu_conflict(config)
-    if conflict:
-        raise ConfigError(conflict)
     for engines in (config.stt, config.tts, config.tts_pack):
         names = [e.name for e in engines]
         if len(names) != len(set(names)):
@@ -253,21 +249,3 @@ def load_config(path: Path) -> Config:
             raise ConfigError(f"endpoint {ep.uri} offers neither stt nor tts")
     return config
 
-
-def ort_gpu_conflict(config: Config) -> Optional[str]:
-    """ONNX Runtime's WebGPU plug-in (0.4.0) runs every session of a process on the GPU of the first one (measured: a
-    second session asking for another GPU silently ran on the first). So all ONNX engines that may use a GPU must ask
-    for the same one; otherwise say which differ."""
-    wanted: dict[str, list[str]] = {}
-    entries = [(f"[[tts]] {e.name}", e.backend, e.device, e.gpu) for e in config.tts]
-    entries += [(f"[[tts_pack]] {e.name}", e.backend, e.device, e.gpu) for e in config.tts_pack
-                if str(e.options.get("enabled", True)).lower() not in ("false", "0", "no", "off")]
-    entries += [(f"[[tts_library]] {lib.path}", lib.backend, lib.device, lib.gpu) for lib in config.tts_library]
-    for where, backend, device, gpu in entries:
-        if backend in ORT_BACKENDS and device != "cpu":
-            wanted.setdefault(config.gpu.select(gpu).name_contains, []).append(where)
-    if len(wanted) > 1:
-        detail = "; ".join(f"{name!r}: {', '.join(items)}" for name, items in wanted.items())
-        return ("the ONNX engines (Piper, Kokoro, Kitten, Pocket) can use only one GPU per process, but ask for "
-                f"several ({detail}); give them the same gpu, or device = \"cpu\"")
-    return None

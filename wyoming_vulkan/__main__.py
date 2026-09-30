@@ -18,6 +18,7 @@ from .engines import BACKENDS, create_engine
 from .engines.base import GpuUnavailable
 from .handler import Services, WyomingHandler
 from .voices import VoiceRegistry
+from .worker import make_worker
 
 _LOGGER = logging.getLogger("wyoming_vulkan")
 
@@ -76,8 +77,10 @@ async def main() -> int:
     try:
         for cfg in config.tts:  # merge the speech settings ([voice_settings]) into each fixed voice's options
             cfg.options = config.speech_options(cfg.name, cfg.options)
-        for cfg in config.stt + config.tts:
-            engine = create_engine(cfg, config.gpu)
+        # STT engines run in this process; every TTS model in its own worker (worker.py). The first max_warm_models
+        # [[tts]] voices are started now (proving their GPU); the others start on first use.
+        tts = [make_worker(cfg, config.gpu) for cfg in config.tts]
+        for cfg, engine in [(c, create_engine(c, config.gpu)) for c in config.stt] + list(zip(config.tts, tts))[:config.server.max_warm_models]:
             rss0 = devices.memory_mb()
             t = time.perf_counter()
             engine.load()
@@ -87,7 +90,8 @@ async def main() -> int:
             engine.runtime.memory_mb = devices.memory_mb() - rss0
             _LOGGER.info("%s %s: load %.1f s, warm-up %.1f s, ~%.0f MiB", cfg.kind, cfg.name, loaded, time.perf_counter() - t,
                          engine.runtime.memory_mb)
-            (stt if cfg.kind == "stt" else tts).append(engine)
+            if cfg.kind == "stt":
+                stt.append(engine)
     except GpuUnavailable as err:
         _LOGGER.error("!!! GPU requested (device = \"gpu\") but not available: %s", err)
         _LOGGER.error("!!! Refusing to start. Use device = \"auto\" to fall back to the CPU, or \"cpu\".")
@@ -96,16 +100,16 @@ async def main() -> int:
         _LOGGER.error("Start-up failed: %s", err)
         return 1
 
-    for engine in stt + tts:
+    for engine in stt + [e for e in tts if e.runtime.actual != "unloaded"]:
         level = logging.WARNING if engine.runtime.fell_back else logging.INFO
         _LOGGER.log(level, "%s %-28s %s", engine.config.kind.upper(), engine.name, engine.runtime.summary())
     if any(e.runtime.fell_back for e in stt + tts):
         _LOGGER.warning("!!! Running with CPU FALLBACK for at least one engine (see above); voice is slower.")
 
     voices = VoiceRegistry(
-        tts, config.tts_library, config.gpu, config.server.max_loaded_voices, create_engine, config.speech_options
+        tts, config.tts_library, config.gpu, config.server.max_warm_models, make_worker, config.speech_options
     )
-    await voices.add_packs([create_engine(cfg, config.gpu) for cfg in config.tts_pack])
+    await voices.add_packs([make_worker(cfg, config.gpu) for cfg in config.tts_pack])
     await voices.refresh()
     for i, lib in enumerate(config.tts_library):
         problem = voices.problem(i)
@@ -114,9 +118,10 @@ async def main() -> int:
             return 1
     library_names = [n for n in voices.names() if n not in {e.name for e in tts}]
     _LOGGER.info(
-        "Voices: %d fixed, %d from %d folder(s) and %d from %d pack(s), loaded on first use (max %d folder voices at once)",
+        "Voices: %d fixed, %d from %d folder(s) and %d from %d pack(s); each model in its own worker, started on first "
+        "use, at most %d warm at once (max_warm_models)",
         len(tts), len(library_names) - len(voices.pack_voices), len(config.tts_library), len(voices.pack_voices),
-        len(voices.packs), config.server.max_loaded_voices,
+        len(voices.packs), config.server.max_warm_models,
     )
     # One Wyoming server per endpoint, all sharing the loaded engines (HA: one STT entity per endpoint)
     by_name = {e.name: e for e in stt}

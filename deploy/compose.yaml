@@ -59,7 +59,7 @@ configs:
       [server]                           # host port WYOMING_PORT
       uri = "tcp://0.0.0.0:10310"
       stt = ["parakeet"]
-      max_loaded_voices = ${MAX_LOADED_VOICES:-2}
+      max_warm_models = ${MAX_WARM_MODELS:-1}  # TTS models kept loaded (each its own process); LRU is stopped
       web_port = 10312                   # diagnostics page inside the container (host port DIAG_PORT); 0 = off
 
       [[endpoint]]                       # host port WHISPER_PORT
@@ -98,7 +98,7 @@ configs:
       backend = "piper"
       model = "/data/models/piper/${DEFAULT_VOICE:-en_US-ljspeech-high}.onnx"
       device = "${WYOMING_DEVICE:-auto}"
-      gpu = "${ONNX_GPU:-}"              # Piper, Kokoro, Kitten, Pocket: one GPU for all of them (ONNX Runtime limit)
+      gpu = "${PIPER_GPU:-}"
       languages = ["${DEFAULT_VOICE_LANGUAGE:-en_US}"]
 
       # Voice packs: one model, many voices, offered as "<pack>_<voice>" ("Kokoro af_heart [<device>]" in HA) and
@@ -108,21 +108,21 @@ configs:
       backend = "kokoro"
       model = "/data/models/kokoro/model.onnx"
       device = "${WYOMING_DEVICE:-auto}"
-      gpu = "${ONNX_GPU:-}"
+      gpu = "${KOKORO_GPU:-}"
 
       [[tts_pack]]
       name = "kitten"                    # KittenTTS nano (15M, the fastest engine here): 8 English voices
       backend = "kitten"
       model = "/data/models/kitten/kitten_tts_nano_v0_8.onnx"
       device = "${WYOMING_DEVICE:-auto}"
-      gpu = "${ONNX_GPU:-}"
+      gpu = "${KITTEN_GPU:-}"
 
       [[tts_pack]]
       name = "pocket"                    # Pocket TTS (Kyutai): 6 English voices, streams 80 ms frames (first audio ~0.1 s)
       backend = "pocket"
       model = "/data/models/pocket/pocket-tts-english.onnx"
       device = "${POCKET_DEVICE:-cpu}"   # autoregressive: faster on the CPU than on a small iGPU
-      gpu = "${ONNX_GPU:-}"
+      gpu = "${POCKET_GPU:-}"
       exclude = ["cosette"]              # a very quiet voice that fails half of the round-trip tests
 
       [[tts_pack]]
@@ -156,18 +156,18 @@ configs:
       [[tts_library]]
       path = "/data/models/piper"
       device = "${WYOMING_DEVICE:-auto}"
-      gpu = "${ONNX_GPU:-}"
+      gpu = "${PIPER_GPU:-}"
 
       [[tts_library]]
       path = "/data/voices"
       device = "${WYOMING_DEVICE:-auto}"
-      gpu = "${ONNX_GPU:-}"
+      gpu = "${PIPER_GPU:-}"
       optional = true
       recursive = true
 
       [[tts_library]]
       path = "/voices-extra"
       device = "${WYOMING_DEVICE:-auto}"
-      gpu = "${ONNX_GPU:-}"
+      gpu = "${PIPER_GPU:-}"
       optional = true
       min_age_seconds = ${EXTRA_VOICES_MIN_AGE:-60}

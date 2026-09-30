@@ -105,7 +105,8 @@ config when it runs without Compose.
 | Topic | How |
 |---|---|
 | Device | `WYOMING_DEVICE=auto` (GPU, else CPU with a warning), `gpu` (refuse to start without the GPU), `cpu` |
-| Which GPU | `PARAKEET_GPU`, `WHISPER_GPU`, `ONNX_GPU` (Piper, Kokoro, Kitten, Pocket together), `COSYVOICE_GPU`: `intel`, `nvidia`, `amd` or part of the GPU's Vulkan name; empty = `GPU_NAME_CONTAINS`. See [Several GPUs](#several-gpus) |
+| Which GPU | `PARAKEET_GPU`, `WHISPER_GPU`, `PIPER_GPU` (default voice and voice folders), `KOKORO_GPU`, `KITTEN_GPU`, `POCKET_GPU`, `COSYVOICE_GPU`: `intel`, `nvidia`, `amd` or part of the GPU's Vulkan name; empty = `GPU_NAME_CONTAINS`. See [Several GPUs](#several-gpus) |
+| Warm models | `MAX_WARM_MODELS` (default 1): text-to-speech models kept loaded, each in its own process. Using another one stops the least recently used first (its memory is freed), then starts the new one (~2–7 s, CosyVoice3 ~15 s). Set it to the number of models Home Assistant uses regularly |
 | Other models | `PARAKEET_MODEL`, `WHISPER_MODEL` in `DATA_DIR/models/parakeet` and `…/whisper` (`scripts/fetch-models.sh --list`) |
 | Languages | `PARAKEET_LANGUAGES` (default `en`, `auto` = all 25 of Parakeet v3); Whisper offers all of its languages |
 | Whisper speed | `WHISPER_AUDIO_CTX=512` (~10 s window, ~3× faster; longer audio uses the full window automatically), `0` = always 30 s |
@@ -163,11 +164,11 @@ Each engine can use a different GPU, or the CPU: `device = "gpu" | "cpu" | "auto
 small and the Piper voices on the iGPU (always there), CosyVoice3 on the NVIDIA card. The log lists the Vulkan GPUs
 and where each engine runs, and Home Assistant shows it: `CosyVoice zh_female [NVIDIA GeForce RTX 4060]`.
 
-- **Parakeet, Whisper and CosyVoice3** can each use any GPU.
-- **Piper, Kokoro, Kitten and Pocket** share one GPU: ONNX Runtime's WebGPU plug-in (0.4.0) runs all sessions of a
-  process on one GPU, and picks it only by power preference (integrated vs discrete). The server refuses a config
-  where they ask for different GPUs (each can still use `device = "cpu"`), and it cannot choose between two discrete
-  GPUs for them.
+- Every engine can use any GPU: speech-to-text runs in the server, every text-to-speech model in its own worker
+  process (ONNX Runtime's WebGPU plug-in can use only one GPU per process, so this is what lets Piper, Kokoro, Kitten
+  and Pocket models sit on different GPUs).
+- The WebGPU plug-in (0.4.0) picks its GPU only by power preference (integrated vs discrete), so the ONNX models cannot
+  choose between two discrete GPUs.
 - A voice pack with `device = "gpu"` whose GPU is missing is not offered (warning in the log).
 
 ## Troubleshooting

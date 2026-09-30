@@ -16,13 +16,14 @@ Home Assistant                       Wyoming over TCP (JSON header line + option
 │   │     └─ Whisper:  ctypes → libwhisper.so ──┴─ ggml (Vulkan backend) ─┐     │
 │   └─ TTS: synthesize | synthesize-start/chunk/stop                        │     │
 │         → audio-start/chunk/stop (+ synthesize-stopped)                   │     │
+│         (each TTS model in its own worker process, ≤ max_warm_models warm)│     │
 │         ├─ Piper / Kokoro / KittenTTS → ONNX Runtime → WebGPU EP → Dawn ┐ │     │
 │         ├─ Pocket TTS → ONNX Runtime, CPU EP                             │ │     │
 │         └─ CosyVoice3 → HTTP → cosyvoice-server (child process, own ggml) ┤ │     │
 │                                                  Vulkan loader ◄┴─────────┘     │
-│                                                  Mesa driver (one ICD file only) │
-└─────────────────────────────────────────────────────────── /dev/dri/renderD128 ─┘
-                                                   kernel driver (i915 / xe) → GPU
+│                                   Mesa (Intel) / NVIDIA drivers (listed ICD files) │
+└──────────────────────────────────────── /dev/dri/renderD128 (+ NVIDIA runtime) ─┘
+                                        kernel drivers (i915 / xe, nvidia) → GPUs
 ```
 
 All engines meet at **Vulkan / Mesa**: no vendor compute runtime (no Intel compute runtime, no OpenVINO, no CUDA). ONNX Runtime's OpenVINO execution provider was measured and rejected for Piper: OpenVINO's GPU plugin compiles a kernel set per input shape, and Piper's input length changes with every sentence, so every new sentence length cost 20–65 s. The WebGPU EP runs operator by operator with ready-made GPU programs that take sizes at run time.
@@ -80,7 +81,8 @@ wyoming_vulkan/
   config.py          TOML config (stdlib tomllib), validation
   handler.py         protocol only; per endpoint: its STT engines (routing) and optionally the voices
   info.py            the Wyoming Info per endpoint (what HA sees)
-  voices.py          voice registry: fixed voices + voice folders, loaded on first use
+  voices.py          voice registry: fixed voices, voice folders, packs; at most max_warm_models warm
+  worker.py          each TTS model in its own process (WorkerEngine in the server, `python -m wyoming_vulkan.worker`)
   devices.py         Vulkan driver-file check, environment report
   healthcheck.py     describe -> info on every endpoint
   web.py             diagnostics page (aiohttp, same event loop): status, sample speech, benchmark job
@@ -106,13 +108,14 @@ wyoming_vulkan/
 ### 3.5 Voices (`voices.py`)
 
 - **Names in HA:** every voice's description is `<Engine> <voice> [<where it runs>]` (`Piper ljspeech-high [...]`, `Kokoro af_heart [...]`, `Kitten Bella [...]`), so the engines stay grouped in HA's voice list. Piper voice ids are the file names; pack voice ids are `<pack>_<voice>`.
-- **Voice packs** (`[[tts_pack]]`, a `TtsPack` engine): one model with many voices (Kokoro, KittenTTS). At start only the voice list is read (small files, worker thread with timeout; unreadable files leave the pack out with a warning); the model loads and warms up on first use and stays loaded; a pack that fails to load disappears from `info` and its requests use the default voice. `use()` hands out a small handle binding the pack engine to one voice and that voice's speech settings.
-- **Fixed voices** (`[[tts]]`) are loaded and warmed up at start; the first is the default voice.
-- **Voice folders** (`[[tts_library]]`, `path` = a folder or a list; `recursive`, `optional`, `min_age_seconds`): every `<name>.onnx` with a `<name>.onnx.json` is offered. `describe` rescans the folders at most every 5 s. A voice loads on first use (in a worker thread, 90 s timeout), is reloaded when its files change, and at most `max_loaded_voices` folder voices stay loaded (least recently used is unloaded; never one that is in use). Unknown or broken voices fall back to the default voice; a broken voice stays hidden until its files change.
+- **One process per model** (0.10.0, `worker.py`): every text-to-speech model (a Piper voice file, a pack) runs in its own worker process; speech-to-text stays in the server. `WorkerEngine` stands in for the engine: it starts `python -m wyoming_vulkan.worker`, which loads the real engine (GPU proof, warm-up) and then speaks sentence by sentence over stdin/stdout (one JSON line per message, PCM bytes after an audio header; frame streaming is passed through). Why: each process has its own GPU context, so every model can use any GPU (ONNX Runtime's WebGPU plug-in allows one GPU per process, §7); stopping a worker returns its memory (an iGPU's memory is the host's RAM); a crash in a runtime or driver takes down one worker, which the next request starts again. Measured cost: ~0.2 s and ~45 MB per worker, and ~0.6–1.2 s more for a cold start than in-process; warm speed is unchanged (Pocket's first frame even improved from 0.27 to 0.07 s without the other engines in its process). A worker exits when its stdin closes and, via `PR_SET_PDEATHSIG`, when the server dies.
+- **Warm models:** every model loads on first use; at most `max_warm_models` stay warm. Before another one starts, the least recently used idle one is stopped (so its memory is free first); models in use are never stopped (the limit is exceeded for a moment instead). The first `max_warm_models` `[[tts]]` voices are started at start-up, proving their GPU (with `device = "gpu"` the server refuses to start without it); the first `[[tts]]` voice is the default (requests without a known voice), started again when needed. `info` shows where a model runs, or ran when it was last warm, or would run.
+- **Voice packs** (`[[tts_pack]]`, a `TtsPack` engine): one model with many voices (Kokoro, KittenTTS, Pocket, CosyVoice3). At start only the voice list is read (small files, thread with timeout; unreadable files leave the pack out with a warning); a pack that fails to load disappears from `info` and its requests use the default voice. `use()` hands out a small handle binding the pack engine to one voice and that voice's speech settings.
+- **Voice folders** (`[[tts_library]]`, `path` = a folder or a list; `recursive`, `optional`, `min_age_seconds`): every `<name>.onnx` with a `<name>.onnx.json` is offered. `describe` rescans the folders at most every 5 s. A voice loads on first use (90 s timeout) and is reloaded when its files change; it counts towards `max_warm_models` like any model. Unknown or broken voices fall back to the default voice; a broken voice stays hidden until its files change.
 - **Half-written files:** both files must exist, be non-empty and older than `min_age_seconds`; a voice that appears or changes while the server runs is offered only after its mtime and both sizes stayed the same for 10 s (a copy over SMB can keep the source's old mtime).
 - **Network folders:** a folder on a `hard` NFS mount can hang instead of failing. Each folder is scanned in its own worker thread with a 5 s timeout, and a folder whose previous scan is still stuck is skipped immediately, so a hung share never blocks the event loop or speech-to-text. `optional = true` turns a missing folder into a warning.
 - **Speech settings** (`length_scale` speed, `noise_scale` expressiveness, `noise_w` rhythm): unset values use the voice's own `.onnx.json` ("inference"); `[voice_settings."*"]` sets them for every voice (the Compose stack fills it from `PIPER_*` in `.env`), a voice's `[[tts]]`/`[[tts_library]]` entry overrides that, and `[voice_settings."<voice>"]` overrides both. Empty values never erase a more specific one (`Config.speech_options`); the load log shows each effective value and its source.
-- Language of a folder voice: the `ll_CC-` prefix of the file name, else `language.code` or the espeak voice in its config, unless the folder sets `languages`. Its `info` label before it is loaded is predicted from the loaded voices on the same kind of device.
+- Language of a folder voice: the `ll_CC-` prefix of the file name, else `language.code` or the espeak voice in its config, unless the folder sets `languages`. Its `info` label before it is loaded is predicted from loaded models on the same GPU, else that GPU's Vulkan name.
 
 ## 4. Engines
 
@@ -193,7 +196,7 @@ Each engine picks its GPU with `gpu = "intel" | "nvidia" | "amd" | "<part of the
 | CosyVoice3 (child process) | `--backend VulkanN`, the ggml name of the matching device in this process's list (same loader, same driver files) | the server exits if the device does not exist |
 | Piper, Kokoro, Kitten, Pocket (ONNX Runtime WebGPU plug-in 0.4.0) | `powerPreference`: `low-power` → the integrated GPU, `high-performance` → the discrete one (only when there are several GPUs) | WebGPU EP active; the adapter itself cannot be read back from the plug-in, so the device name shown is the predicted one |
 
-**Measured limits of the WebGPU plug-in** (Intel iGPU + RTX 4060, KittenTTS): the EP device passed to `add_provider_for_devices` is ignored (with no preference Dawn takes the discrete GPU whichever device is passed); `powerPreference` decides. All sessions of a process share WebGPU context 0: a second session asking for the other GPU silently ran on the first session's GPU; a separate context (`deviceId` > 0) fails without a custom WebGPU instance, and the session silently becomes a CPU session. Hence: all ONNX engines that may use a GPU must ask for the same one (`config.ort_gpu_conflict` refuses anything else at start-up, `make_session` refuses a second GPU at run time), and two discrete GPUs cannot be told apart for them. `adapterIndex` (merged upstream 2026-09-25, not in 0.4.0) would lift this. Concurrent `Run()` on sessions of two GPUs has been reported to crash (onnxruntime #32561); not possible here because of the one-GPU rule.
+**Measured limits of the WebGPU plug-in** (Intel iGPU + RTX 4060, KittenTTS): the EP device passed to `add_provider_for_devices` is ignored (with no preference Dawn takes the discrete GPU whichever device is passed); `powerPreference` decides. All sessions of a process share WebGPU context 0: a second session asking for the other GPU silently ran on the first session's GPU; a separate context (`deviceId` > 0) fails without a custom WebGPU instance, and the session silently becomes a CPU session. Hence (0.10.0) every text-to-speech model runs in its own worker process (§3.5), which gives each its own WebGPU context and so its own GPU; `make_session` still refuses a second GPU within one process. Two discrete GPUs cannot be told apart by power preference. `adapterIndex` (merged upstream 2026-09-25, not in 0.4.0) would lift this. Concurrent `Run()` on two WebGPU sessions has been reported to crash (onnxruntime #32561); with one model per process that cannot happen, and a crash would only stop one worker.
 
 **A pack with `device = "gpu"` whose GPU is missing** is not offered at all (warning), since it could only fail on first use.
 

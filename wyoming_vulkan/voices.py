@@ -1,5 +1,8 @@
-"""TTS voices: the fixed [[tts]] engines (loaded at start) plus folders of voices ([[tts_library]]), loaded on
-first use and unloaded again when more than `max_loaded_voices` library voices are in memory.
+"""TTS voices: the [[tts]] voices, folders of voices ([[tts_library]]) and voice packs ([[tts_pack]]).
+
+Every model (a Piper voice file, a pack) is loaded on first use and stays warm until more than `max_warm_models`
+models are warm; then the least recently used idle one is stopped (in production each model is a worker process,
+worker.py). The first [[tts]] voice is the default: used for requests without a (known) voice, loaded again if needed.
 
 Library folders may be on NFS with a `hard` mount, where a NAS outage makes file access hang instead of fail. So
 every scan and every load of a library voice runs in a worker thread with a timeout: a hung NAS costs that voice
@@ -56,6 +59,7 @@ class _LibraryVoice:
     loaded_sig: Optional[Signature] = None
     active: int = 0
     last_used: float = 0.0
+    last_label: str = ""  # where it ran when it was last warm
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 
@@ -115,12 +119,25 @@ def _title(backend: str) -> str:
 
 @dataclass
 class _Pack:
-    """A voice pack (one model, many voices), loaded on first use and then kept."""
+    """A voice pack (one model, many voices)."""
 
     engine: TtsPack
     voices: dict[str, list[str]]  # voice id -> languages
     loaded: bool = False
     failed: Optional[str] = None
+    active: int = 0
+    last_used: float = 0.0
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+
+
+@dataclass
+class _Fixed:
+    """A [[tts]] voice (its engine object exists from the start; its model is warm or not)."""
+
+    engine: TtsEngine
+    loaded: bool = False
+    active: int = 0
+    last_used: float = 0.0
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 
@@ -149,22 +166,29 @@ class _PackVoice:
         return (lambda text, options: stream(text, self._options(options))) if stream else None
 
 
+def _alive(engine) -> bool:
+    """False once a worker process has died (in-process engines are always alive)."""
+    return getattr(engine, "alive", True)
+
+
 class VoiceRegistry:
     def __init__(
         self,
         fixed: list[TtsEngine],
         libraries: list[LibraryConfig],
         gpu: GpuConfig,
-        max_loaded: int,
+        max_warm: int,
         factory: Callable[[EngineConfig, GpuConfig], TtsEngine],
         speech_options: Optional[Callable[[str, dict], dict]] = None,
     ) -> None:
         # (voice name, the folder's options) -> the voice's options with its speech settings (Config.speech_options)
         self.speech_options = speech_options or (lambda _name, options: dict(options))
         self.fixed = {e.name: e for e in fixed}
+        # engines loaded before the registry exists (at start-up) count as warm
+        self._fixed = {e.name: _Fixed(e, loaded=e.runtime.actual != "unloaded", last_used=time.monotonic()) for e in fixed}
         self.libraries = libraries
         self.gpu = gpu
-        self.max_loaded = max(1, max_loaded)
+        self.max_warm = max(1, max_warm)
         self.factory = factory
         self.library_voices: dict[str, _LibraryVoice] = {}
         self.packs: dict[str, _Pack] = {}  # pack name -> pack
@@ -213,10 +237,15 @@ class VoiceRegistry:
 
     async def _ensure_pack(self, pack: _Pack) -> bool:
         async with pack.lock:
-            if pack.loaded:
+            if pack.loaded and _alive(pack.engine):
                 return True
             if pack.failed:
                 return False
+            if pack.loaded:
+                _LOGGER.warning("tts pack %s: its worker stopped; starting it again", pack.engine.name)
+                pack.loaded = False
+                await asyncio.to_thread(pack.engine.close)
+            await self._evict(room_for=pack)
             t = time.perf_counter()
             rss0 = devices.memory_mb()
             try:
@@ -328,17 +357,17 @@ class VoiceRegistry:
 
     def voices(self) -> list[VoiceInfo]:
         out = [
-            VoiceInfo(e.name, f"{e.config.description or _title(e.config.backend) + ' ' + _strip_language(e.name)} [{e.runtime.label()}]",
-                      e.languages, e.config.backend)
+            VoiceInfo(e.name, f"{e.config.description or _title(e.config.backend) + ' ' + _strip_language(e.name)} "
+                              f"[{self._label(e)}]", e.languages, e.config.backend)
             for e in self.fixed.values()
         ]
         for v in self.library_voices.values():
-            label = v.engine.runtime.label() if v.engine else self._predicted_label(v.library.device, self.gpu.select(v.library.gpu))
+            label = v.engine.runtime.label() if v.engine else (v.last_label or self._predicted_label(v.library.device, self.gpu.select(v.library.gpu)))
             out.append(VoiceInfo(v.name, f"{_title(v.library.backend)} {_strip_language(v.name)} [{label}]", v.languages, v.library.backend))
         for name, (pack, voice) in self.pack_voices.items():
             if pack.failed:
                 continue
-            label = pack.engine.runtime.label() if pack.loaded else self._predicted_label(pack.engine.config.device, pack.engine.gpu)
+            label = self._label(pack.engine)
             title = pack.engine.config.description or _title(pack.engine.config.backend)
             out.append(VoiceInfo(name, f"{title} {voice} [{label}]", pack.voices[voice], pack.engine.config.backend))
         return out
@@ -348,53 +377,101 @@ class VoiceRegistry:
 
     # ---- using a voice ----
 
+    def _label(self, engine: TtsEngine) -> str:
+        """Where a model runs, or ran when it was last warm, or would run (never loaded yet)."""
+        if engine.runtime.actual != "unloaded":
+            return engine.runtime.label()
+        return self._predicted_label(engine.config.device, engine.gpu)
+
+    def _default_entry(self):
+        if self._fixed:
+            return next(iter(self._fixed.values()))
+        return next(iter(self.library_voices.values()), None)
+
     def default(self) -> TtsEngine:
-        if self.fixed:
-            return next(iter(self.fixed.values()))
-        loaded = [v.engine for v in self.library_voices.values() if v.engine]
-        if loaded:
-            return loaded[0]
-        raise RuntimeError("no voice available")
+        """The default voice's engine object (it may be cold: speak through `use(None)`)."""
+        entry = self._default_entry()
+        if entry is None or entry.engine is None:
+            raise RuntimeError("no voice available")
+        return entry.engine
+
+    def _lookup(self, name: Optional[str]):
+        """(entry, pack voice id) for a voice name, or (None, None)."""
+        if not name:
+            return None, None
+        if name in self._fixed:
+            return self._fixed[name], None
+        if name in self.pack_voices:
+            return self.pack_voices[name]
+        return self.library_voices.get(name), None
 
     @asynccontextmanager
     async def use(self, name: Optional[str]) -> AsyncIterator[TtsEngine]:
-        """The engine for a voice, loading a library voice if needed. Unknown or failing voices -> the default."""
-        if name in self.fixed:
-            yield self.fixed[name]
-            return
-        if name in self.pack_voices:
-            pack, voice = self.pack_voices[name]
-            if await self._ensure_pack(pack):
-                yield _PackVoice(pack.engine, voice, name, self.speech_options(name, pack.engine.config.options))
-            else:
-                yield self.default()
-            return
-        entry = self.library_voices.get(name) if name else None
+        """The engine for a voice, warming its model if needed. Unknown or failing voices -> the default voice."""
+        entry, voice = self._lookup(name)
         if entry is None:
-            if name and name not in self.fixed:
+            if name:
                 _LOGGER.warning("voice %r is not available; using the default voice", name)
-            if not self.fixed and self.library_voices:
-                entry = next(iter(self.library_voices.values()))
-            else:
-                yield self.default()
-                return
+            entry = self._default_entry()
+            if entry is None:
+                raise RuntimeError("no voice available")
         entry.active += 1
         try:
-            engine = await self._ensure_loaded(entry)
-            entry.last_used = time.monotonic()
-            yield engine if engine is not None else self.default()
+            engine = await self._ensure(entry)
+            if engine is not None:
+                entry.last_used = time.monotonic()
+                if isinstance(entry, _Pack):
+                    yield _PackVoice(engine, voice, name, self.speech_options(name, engine.config.options))
+                else:
+                    yield engine
+                return
         finally:
             entry.active -= 1
-        await self._evict()
+            await self._evict()
+        if entry is self._default_entry():
+            raise RuntimeError("the default voice could not be loaded")
+        async with self.use(None) as fallback:
+            yield fallback
+
+    async def _ensure(self, entry) -> Optional[TtsEngine]:
+        if isinstance(entry, _Pack):
+            return entry.engine if await self._ensure_pack(entry) else None
+        if isinstance(entry, _Fixed):
+            return await self._ensure_fixed(entry)
+        return await self._ensure_loaded(entry)
+
+    async def _ensure_fixed(self, entry: _Fixed) -> Optional[TtsEngine]:
+        async with entry.lock:
+            if entry.loaded and _alive(entry.engine):
+                return entry.engine
+            if entry.loaded:
+                _LOGGER.warning("voice %s: its worker stopped; starting it again", entry.engine.name)
+                entry.loaded = False
+                await asyncio.to_thread(entry.engine.close)
+            await self._evict(room_for=entry)
+            t = time.perf_counter()
+            rss0 = devices.memory_mb()
+            try:
+                await asyncio.wait_for(asyncio.to_thread(entry.engine.load), LOAD_TIMEOUT_S)
+                await asyncio.wait_for(asyncio.to_thread(entry.engine.warm_up), LOAD_TIMEOUT_S)
+                entry.engine.runtime.memory_mb = devices.memory_mb() - rss0
+            except Exception as err:
+                _LOGGER.error("voice %s could not be loaded: %s", entry.engine.name, err or type(err).__name__)
+                return None
+            entry.loaded = True
+            _LOGGER.info("voice %s loaded on demand in %.1f s on %s", entry.engine.name, time.perf_counter() - t,
+                         entry.engine.runtime.summary())
+            return entry.engine
 
     async def _ensure_loaded(self, entry: _LibraryVoice) -> Optional[TtsEngine]:
         async with entry.lock:
-            if entry.engine is not None and entry.loaded_sig == entry.sig:
+            if entry.engine is not None and entry.loaded_sig == entry.sig and _alive(entry.engine):
                 return entry.engine
-            if entry.engine is not None:  # the file changed on disk: load the new version
-                _LOGGER.info("voice %s changed on disk; reloading", entry.name)
+            if entry.engine is not None:  # the file changed on disk, or the worker died: load again
+                _LOGGER.info("voice %s changed on disk or its worker stopped; reloading", entry.name)
                 old, entry.engine = entry.engine, None
                 await asyncio.to_thread(old.close)
+            await self._evict(room_for=entry)
             library = entry.library
             config = EngineConfig(
                 kind="tts", name=entry.name, backend=library.backend, model=entry.path, device=library.device,
@@ -411,21 +488,47 @@ class VoiceRegistry:
                 self._failed[entry.name] = entry.sig
                 return None
             entry.engine, entry.loaded_sig = engine, entry.sig
+            entry.last_label = engine.runtime.label()
             _LOGGER.info("voice %s loaded on demand in %.1f s on %s", entry.name, time.perf_counter() - t, engine.runtime.summary())
             return engine
 
-    async def _evict(self) -> None:
-        loaded = [v for v in self.library_voices.values() if v.engine is not None]
-        excess = len(loaded) - self.max_loaded
-        for v in sorted(loaded, key=lambda v: v.last_used):
+    def _warm(self) -> list:
+        warm: list = [f for f in self._fixed.values() if f.loaded]
+        warm += [v for v in self.library_voices.values() if v.engine is not None]
+        warm += [p for p in self.packs.values() if p.loaded]
+        return warm
+
+    async def _evict(self, room_for=None) -> None:
+        """Stop the least recently used idle models until at most max_warm_models are warm (one less if a model is
+        about to be loaded, `room_for`, so that memory is free before the new model starts)."""
+        warm = [e for e in self._warm() if e is not room_for]
+        excess = len(warm) - (self.max_warm - (1 if room_for is not None else 0))
+        for entry in sorted(warm, key=lambda e: e.last_used):
             if excess <= 0:
                 break
-            if v.active or v.lock.locked():
-                continue
-            engine, v.engine = v.engine, None
+            if entry.active or entry.lock.locked():
+                continue  # in use or loading: stays (the limit is exceeded for a moment)
+            if isinstance(entry, _LibraryVoice):
+                engine, entry.engine = entry.engine, None
+                name = entry.name
+            else:
+                engine, entry.loaded = entry.engine, False
+                name = engine.name
             await asyncio.to_thread(engine.close)
-            _LOGGER.info("voice %s unloaded (max_loaded_voices = %d)", v.name, self.max_loaded)
+            _LOGGER.info("model %s stopped (max_warm_models = %d)", name, self.max_warm)
             excess -= 1
 
+    def is_warm(self, name: str) -> bool:
+        """Whether the model of a [[tts]] voice, a folder voice or a pack (by pack name) is warm."""
+        if name in self._fixed:
+            return self._fixed[name].loaded
+        if name in self.packs:
+            return self.packs[name].loaded
+        v = self.library_voices.get(name)
+        return v is not None and v.engine is not None
+
     def loaded(self) -> list[str]:
-        return [v.name for v in self.library_voices.values() if v.engine is not None]
+        """Names of the warm models."""
+        return ([f.engine.name for f in self._fixed.values() if f.loaded]
+                + [v.name for v in self.library_voices.values() if v.engine is not None]
+                + [p.engine.name for p in self.packs.values() if p.loaded])

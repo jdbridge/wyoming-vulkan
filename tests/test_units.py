@@ -134,14 +134,15 @@ class GpuSelectionTests(unittest.TestCase):
         engine = create_engine(c.stt[0], c.gpu)
         self.assertEqual(engine.gpu.name_contains, "NVIDIA", "create_engine applies the engine's own selector")
 
-    def test_onnx_engines_must_share_one_gpu(self):
+    def test_each_tts_model_may_use_its_own_gpu(self):
+        # every TTS model runs in its own worker process, so ONNX Runtime's one-GPU-per-process limit does not apply
         base = MINIMAL + '[[tts]]\nname = "v"\nbackend = "piper"\nmodel = "/v.onnx"\ngpu = "intel"\n'
-        pack = '[[tts_pack]]\nname = "k"\nbackend = "kokoro"\nmodel = "/k.onnx"\ngpu = "nvidia"\n'
-        with self.assertRaisesRegex(ConfigError, "only one GPU per process"):
-            load_config(write(base + pack))
-        load_config(write(base + pack + 'device = "cpu"\n'))  # on the CPU it does not matter
-        load_config(write(base + pack + "enabled = false\n"))  # nor when the pack is off
-        load_config(write(base + pack.replace("kokoro", "cosyvoice")))  # CosyVoice3 runs in its own process
+        c = load_config(write(base + '[[tts_pack]]\nname = "k"\nbackend = "kokoro"\nmodel = "/k.onnx"\ngpu = "nvidia"\n'))
+        self.assertEqual([c.tts[0].gpu, c.tts_pack[0].gpu], ["intel", "nvidia"])
+
+    def test_old_name_of_max_warm_models(self):
+        c = load_config(write('[server]\nmax_loaded_voices = 3\n' + MINIMAL))
+        self.assertEqual(c.server.max_warm_models, 3)
 
     def test_power_preference(self):
         from wyoming_vulkan.engines.ggml import GgmlDevice
@@ -535,17 +536,33 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_lazy_load_lru_and_active_protection(self):
         r = await self.registry([LibraryConfig(path=make_library(["v1", "v2", "v3"]))], max_loaded=2)
-        self.assertEqual((self.factory.made, r.loaded()), ([], []))
+        fixed = r.fixed["en_US-fixed-high"]
+        self.assertEqual((self.factory.made, r.loaded()), ([], ["en_US-fixed-high"]), "loaded at start-up: warm")
         async with r.use("v1") as e1:
             self.assertEqual(e1.name, "v1")
+        self.assertEqual(r.loaded(), ["en_US-fixed-high", "v1"])
         async with r.use("v2") as e2:
             async with r.use("v3"):
-                pass  # v1 is unloaded here (least recently used); v2 is in use and must stay
+                pass  # the default voice and v1 are stopped here (least recently used); v2 is in use and must stay
         self.assertEqual(sorted(r.loaded()), ["v2", "v3"])
-        self.assertTrue(e1.closed and not e2.closed)
+        self.assertTrue(fixed.closed and e1.closed and not e2.closed, "the default voice is a model like any other")
         async with r.use("v1"):
             pass
         self.assertEqual(len(self.factory.made), 4, "v1 was loaded again")
+        fixed.closed = False
+        async with r.use(None) as e:  # no voice: the default voice, started again
+            self.assertIs(e, fixed)
+        self.assertIn("en_US-fixed-high", r.loaded())
+
+    async def test_one_warm_model(self):
+        r = await self.registry([LibraryConfig(path=make_library(["v1"]))], max_loaded=1)
+        fixed = r.fixed["en_US-fixed-high"]
+        async with r.use("v1"):
+            self.assertTrue(fixed.closed, "stopped before v1 started, so its memory is free first")
+        self.assertEqual(r.loaded(), ["v1"])
+        async with r.use("en_US-fixed-high"):
+            pass
+        self.assertEqual(r.loaded(), ["en_US-fixed-high"])
 
     async def test_unknown_and_broken_voices_use_default(self):
         folder = make_library(["good", "bad"])
@@ -651,7 +668,7 @@ class HandlerLibraryTests(HandlerTests.__base__):
         self.assertEqual([(v.name, v.description, v.languages) for v in voices], [
             ("en_US-fixed-high", "Fake fixed-high [Fake GPU]", ["en"]), ("en_US-lib-medium", "Piper lib-medium [Fake GPU]", ["en_US"])])
         await self.converse([Synthesize(text="Hi.", voice=SynthesizeVoice(name="en_US-lib-medium")).event()], {"audio-stop"})
-        self.assertEqual(self.registry.loaded(), ["en_US-lib-medium"])
+        self.assertIn("en_US-lib-medium", self.registry.loaded())
         self.assertEqual(self.registry.library_voices["en_US-lib-medium"].engine.texts, [("Hi.", None)])
         self.assertEqual(self.tts[0].texts, [])
 
@@ -992,9 +1009,11 @@ class WebTests(unittest.IsolatedAsyncioTestCase):
                 break
             await asyncio.sleep(0.05)
         self.assertFalse(job["running"])
-        # the fake models cannot be loaded as real engines: every planned row is there, with an error
+        # TTS models come from the registry's factory (fakes here; workers in production); the fake STT model cannot
+        # be loaded as a real engine: every planned row is there, the STT row with an error
         self.assertEqual(job["done"], job["total"])
-        self.assertTrue(all(row["error"] for row in job["rows"]))
+        self.assertTrue(all(row["error"] for row in job["rows"] if row["kind"] == "stt"))
+        self.assertTrue(all(not row["error"] for row in job["rows"] if row["kind"] == "tts"))
 
 
 if __name__ == "__main__":

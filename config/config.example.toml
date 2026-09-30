@@ -5,7 +5,7 @@
 uri = "tcp://0.0.0.0:10310"      # the main endpoint
 samples_per_chunk = 1024         # size of the audio-chunk events sent back (as in wyoming-piper)
 max_audio_seconds = 60           # STT input beyond this is dropped
-max_loaded_voices = 2            # library voices kept in memory at once (least recently used is unloaded)
+max_warm_models = 1              # TTS models kept loaded, each in its own process (least recently used is stopped)
 
 [gpu]                            # how the GPU is recognised (Intel shown)
 name_contains = "Intel"          # in the ggml / Vulkan device description, e.g. "Intel(R) Graphics (ADL-N)"

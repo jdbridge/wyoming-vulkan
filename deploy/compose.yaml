@@ -110,6 +110,15 @@ configs:
       device = "${WYOMING_DEVICE:-auto}"
       gpu = "${KOKORO_GPU:-}"
 
+      [[tts_pack]]                       # an extra Kokoro model, e.g. your own fine-tune (same layout as models/kokoro)
+      name = "${KOKORO_CUSTOM_NAME:-kokorocustom}"   # voice ids in HA: <name>_<voice file name>
+      backend = "kokoro"
+      model = "/data/models/${KOKORO_CUSTOM_DIR:-kokoro-custom}/model.onnx"
+      enabled = ${KOKORO_CUSTOM_ENABLED:-false}
+      description = "${KOKORO_CUSTOM_DESCRIPTION:-Kokoro custom}"
+      device = "${WYOMING_DEVICE:-auto}"
+      gpu = "${KOKORO_GPU:-}"
+
       [[tts_pack]]
       name = "kitten"                    # KittenTTS nano (15M, the fastest engine here): 8 English voices
       backend = "kitten"

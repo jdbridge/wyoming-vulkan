@@ -71,9 +71,13 @@ class ConfigTests(unittest.TestCase):
             [(str(l.path), l.optional, l.recursive) for l in c.tts_library],
             [("/data/models/piper", False, False), ("/data/voices", True, True), ("/voices-extra", True, False)],
         )
-        self.assertEqual([(p.name, p.backend, str(p.model.parent)) for p in c.tts_pack],
+        self.assertEqual([(p.name, p.backend, str(p.model.parent)) for i, p in enumerate(c.tts_pack) if i != 1],
                          [("kokoro", "kokoro", "/data/models/kokoro"), ("kitten", "kitten", "/data/models/kitten"),
                           ("pocket", "pocket", "/data/models/pocket"), ("cosyvoice", "cosyvoice", "/data/models/cosyvoice")])
+        custom = c.tts_pack[1]  # the extra Kokoro model slot (off unless KOKORO_CUSTOM_ENABLED)
+        self.assertEqual((custom.backend, custom.model.name), ("kokoro", "model.onnx"))
+        self.assertIsInstance(custom.options.get("enabled"), bool)
+        c.tts_pack = [e for e in c.tts_pack if e is not custom]
         pocket = c.tts_pack[2]
         self.assertEqual((pocket.device, pocket.options.get("exclude")), ("cpu", ["cosette"]))
         cosy = c.tts_pack[3]
